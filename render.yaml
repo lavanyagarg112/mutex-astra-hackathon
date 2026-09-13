@@ -31,11 +31,7 @@ services:
         sync: false
       - key: GITHUB_OAUTH_SCOPE
         value: read:user repo
-      - key: COMPANION_DOWNLOAD_URL_MAC
-        sync: false
-      - key: COMPANION_DOWNLOAD_URL_WINDOWS
-        sync: false
-      - key: COMPANION_DOWNLOAD_URL_LINUX
+      - key: COMPANION_RELEASE_URL
         sync: false
 
 databases:
