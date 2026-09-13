@@ -941,12 +941,13 @@ function ActivityPanel({ activity }: { activity: Activity[] }) {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
   }, [activity.length]);
   const categoryColor: Record<string, string> = { REQUEST: "text-blue-300", GIT: "text-violet-300", AGENT: "text-amber-300", REFINE: "text-orange-300", TEST: "text-emerald-300", SYNC: "text-cyan-300", TASK: "text-zinc-100" };
-  return <div className="mb-[108px] flex min-h-0 flex-1 flex-col bg-[#151515] text-zinc-300">
+  return <div className="flex min-h-0 flex-1 flex-col bg-[#151515] text-zinc-300">
     <div className="fine-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono text-[9px] leading-6">
       {activity.map((event) => {
         const date = new Date(event.createdAt); const user = event.user?.username ?? (event.userId || "system");
         return <div key={event.id} className="grid grid-cols-[56px_50px_47px_minmax(0,1fr)] gap-1 border-b border-white/[.035] py-0.5 hover:bg-white/[.03]"><span className="text-zinc-600">{date.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span><span className="truncate text-zinc-500">{user}</span><span className={cx("font-medium", categoryColor[event.category] ?? "text-zinc-400")}>{event.category}</span><span className="break-words text-zinc-300">{event.message}</span></div>;
       })}
+      <div aria-hidden className="h-[108px]" />
       <div ref={bottom} />
     </div>
   </div>;
