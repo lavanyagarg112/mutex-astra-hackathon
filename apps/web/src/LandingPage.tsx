@@ -1,8 +1,21 @@
 import { ArrowRight, Github } from "lucide-react";
+import { useMemo } from "react";
+import { PIXEL_SKIN_IDS } from "@relaycode/shared";
 import { beginGithubLogin } from "./lib/api";
+import { PixelAvatar } from "./PixelCrew";
+
+function randomSkins(count: number): string[] {
+  const pool = [...PIXEL_SKIN_IDS];
+  const picked: string[] = [];
+  while (picked.length < count && pool.length) {
+    picked.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]!);
+  }
+  return picked;
+}
 
 export function LandingPage() {
   const oauthError = new URLSearchParams(window.location.search).get("error");
+  const crewSkins = useMemo(() => randomSkins(3), []);
   return (
     <div className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-[#faf9f6] px-6 py-20 text-center">
       <div className="pointer-events-none absolute inset-0 [background:radial-gradient(ellipse_70%_55%_at_50%_38%,rgba(24,24,27,.05),transparent_70%)]" />
@@ -35,18 +48,19 @@ export function LandingPage() {
           <ArrowRight size={17} className="transition-transform duration-300 group-hover/cta:translate-x-1.5" />
         </button>
 
+        <div className="float-down mt-5 flex items-end gap-6 sm:mt-8 sm:gap-8" style={{ animationDelay: "700ms" }}>
+          {crewSkins.map((skinId, index) => (
+            <div key={skinId} className="flex cursor-default flex-col items-center gap-2">
+              <div className="crew-bob" style={{ animationDelay: `${index * 330}ms`, animationDuration: `${1.7 + index * 0.4}s` }}>
+                <PixelAvatar skinId={skinId} size={72} />
+              </div>
+              <div className="h-1.5 w-9 rounded-full bg-zinc-900/10 blur-[1.5px]" />
+            </div>
+          ))}
+        </div>
+
         {oauthError && <div className="max-w-sm rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[12px] text-red-700">{oauthError}</div>}
       </div>
-
-      <a
-        href="https://github.com/lavanyagarg112/astra-code-chat"
-        target="_blank"
-        rel="noreferrer"
-        className="float-down group/src absolute bottom-8 flex items-center gap-2 text-[14px] font-medium text-zinc-400 transition-colors duration-200 hover:text-zinc-700"
-        style={{ animationDelay: "750ms" }}
-      >
-        <Github size={16} className="transition-transform duration-300 group-hover/src:rotate-[-18deg]" /> View source
-      </a>
     </div>
   );
 }

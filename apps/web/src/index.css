@@ -68,6 +68,12 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 .float-down { animation: float-down 1.4s cubic-bezier(.16,.8,.24,1) both; }
 
+@keyframes crew-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-14px); }
+}
+.crew-bob { animation: crew-bob 2s ease-in-out infinite; }
+
 @keyframes slide-in-left {
   from { opacity: 0; transform: translateX(-10px); }
   to { opacity: 1; transform: translateX(0); }
