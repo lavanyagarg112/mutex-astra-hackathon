@@ -20,7 +20,7 @@ function defaultErrorMessage(status: number): string {
   if (status === 401) return "Your session has expired. Sign in again to continue.";
   if (status === 403) return "You do not have permission to perform this action.";
   if (status === 404) return "The requested item could not be found.";
-  if (status >= 500) return "Relaycode could not complete the request. Please try again.";
+  if (status >= 500) return "Mutex could not complete the request. Please try again.";
   return `Request failed (${status}).`;
 }
 

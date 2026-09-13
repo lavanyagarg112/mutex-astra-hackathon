@@ -1,10 +1,10 @@
 {
   "name": "@relaycode/companion",
   "version": "0.1.0",
-  "description": "Local companion for Relaycode collaborative AI-assisted development.",
+  "description": "Local companion for Mutex collaborative AI-assisted development.",
   "homepage": "https://github.com/lavanyagarg112/astra-code-chat",
   "author": {
-    "name": "Relaycode",
+    "name": "Mutex",
     "email": "lavanyagarg@u.nus.edu"
   },
   "private": true,
@@ -34,10 +34,10 @@
   },
   "build": {
     "appId": "com.relaycode.companion",
-    "productName": "Relaycode Companion",
+    "productName": "Mutex Companion",
     "protocols": [
       {
-        "name": "Relaycode Companion links",
+        "name": "Mutex Companion links",
         "schemes": ["relaycode"]
       }
     ],

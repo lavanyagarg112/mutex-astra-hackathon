@@ -88,7 +88,7 @@ async function api<T>(serverUrl: string, path: string, userId: string, init?: Re
     headers: { "content-type": "application/json", "x-user-id": userId, ...init?.headers },
   });
   const body = await response.json().catch(() => ({})) as { error?: string };
-  if (!response.ok) throw new Error(body.error || `Relaycode returned ${response.status}`);
+  if (!response.ok) throw new Error(body.error || `Mutex returned ${response.status}`);
   return body as T;
 }
 
@@ -100,7 +100,7 @@ async function companionApi<T>(config: DaemonConfig, path: string): Promise<T> {
     },
   });
   const body = await response.json().catch(() => ({})) as { error?: string };
-  if (!response.ok) throw new Error(body.error || `Relaycode returned ${response.status}`);
+  if (!response.ok) throw new Error(body.error || `Mutex returned ${response.status}`);
   return body as T;
 }
 
@@ -187,7 +187,7 @@ async function mapExisting(project: ProjectSummary) {
 async function cloneProject(project: ProjectSummary) {
   const remotePath = new URL(project.repositoryUrl.replace(/^git@github\.com:/, "https://github.com/")).pathname.replace(/\.git$/, "").split("/").filter(Boolean);
   const owner = remotePath.at(-2) ?? "github";
-  const suggestedParent = join(homedir(), "Relaycode", "Projects", owner);
+  const suggestedParent = join(homedir(), "Mutex", "Projects", owner);
   await mkdir(suggestedParent, { recursive: true });
   const selected = await dialog.showOpenDialog(window!, {
     title: `Choose where to clone ${project.name}`,
@@ -240,13 +240,13 @@ function createWindow() {
     ? join(process.resourcesPath, "renderer", "index.html")
     : join(app.getAppPath(), "src", "renderer", "index.html");
   window = new BrowserWindow({
-    width: 920, height: 700, minWidth: 720, minHeight: 560, title: "Relaycode Companion",
+    width: 920, height: 700, minWidth: 720, minHeight: 560, title: "Mutex Companion",
     backgroundColor: "#f5f5f4", webPreferences: { preload: preloadFile, contextIsolation: true, nodeIntegration: false },
   });
   void window.loadFile(rendererFile).catch((error) => {
     const message = sanitizeText(error instanceof Error ? error.message : error);
     console.error(`Could not load Companion interface: ${message}`);
-    void window?.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<main style="font:14px system-ui;padding:32px"><h2>Relaycode Companion could not start</h2><p>${message}</p><p>Interface path: ${rendererFile}</p></main>`)}`);
+    void window?.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<main style="font:14px system-ui;padding:32px"><h2>Mutex Companion could not start</h2><p>${message}</p><p>Interface path: ${rendererFile}</p></main>`)}`);
   });
   window.webContents.setWindowOpenHandler(({ url }) => { void shell.openExternal(url); return { action: "deny" }; });
 }
