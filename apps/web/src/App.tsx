@@ -9,7 +9,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Circle,
   CirclePause,
   CirclePlay,
   Clock3,
@@ -22,11 +21,9 @@ import {
   GitBranch,
   GitCommitHorizontal,
   Github,
-  Globe2,
   History,
   Laptop2,
   Link2,
-  ListOrdered,
   LoaderCircle,
   Menu,
   MessageSquareReply,
@@ -37,10 +34,10 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
-  Search,
   Send,
   Settings,
   ShieldCheck,
+  Smartphone,
   Square,
   TerminalSquare,
   Trash2,
@@ -55,7 +52,7 @@ import {
 import { forwardRef, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type { Activity, Message, PixelSkinId, Project, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
 import { activeStatuses } from "@relaycode/shared";
-import { API_URL, ApiError, api, beginGithubLogin, connectSocket, getActiveUserId, loginWithUsername, logout, setActiveUserId } from "./lib/api";
+import { API_URL, ApiError, api, beginGithubLogin, connectSocket, getActiveUserId, logout, setActiveUserId } from "./lib/api";
 import type { Socket } from "socket.io-client";
 import type { ClientToServerEvents, ServerToClientEvents } from "@relaycode/shared";
 import { PixelAvatar, PixelCrew } from "./PixelCrew";
@@ -63,7 +60,8 @@ import { PIXEL_SKINS } from "./pixelCharacters";
 
 type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 type Member = User & { online: boolean; present: boolean; daemonVersion?: string; syncedSha?: string; mapped?: boolean; synchronized?: boolean; localPath?: string; color: string };
-type ProjectItem = Project & { members: Member[]; onlineCount: number };
+type LastMessagePreview = { body: string; createdAt: string; authorName: string };
+type ProjectItem = Project & { members: Member[]; onlineCount: number; memberCount?: number; lastMessage?: LastMessagePreview | null };
 type ProcessInfo = { name: string; status: "running" | "stopped" | "starting" | "failed"; port?: number; url?: string };
 type ProjectData = { project: ProjectItem; tasks: Task[]; messages: Message[]; activity: Activity[]; processes: ProcessInfo[] };
 type AttachedRequestResult = { kind: "COMBINED_REQUEST" | "IN_FLIGHT_REFINEMENT"; taskId: string; messageId: string };
@@ -167,7 +165,7 @@ export default function App() {
       .finally(() => setCheckingSession(false));
   }, [signedIn]);
   if (checkingSession) return <div className="grid min-h-screen place-items-center bg-[#f4f4f2]"><div className="flex items-center gap-2 text-[11px] text-zinc-500"><LoaderCircle size={15} className="animate-spin" /> Signing you in…</div></div>;
-  if (!signedIn) return <LoginScreen onSignedIn={() => setSignedIn(true)} />;
+  if (!signedIn) return <LoginScreen />;
   return <Workspace />;
 }
 
@@ -269,10 +267,14 @@ function Workspace() {
         setServerMode("live");
       })
       .catch(() => mounted && setServerMode("connecting"));
-    if (projectId) void loadProject(projectId);
+
+    // The socket connection is per-session, not per-project: it must survive
+    // switching projects (the server joins it to every project room the user
+    // belongs to). Recreating it on every project switch caused a visible
+    // full-screen flicker as everything briefly went "connecting" again.
     const nextSocket = connectSocket();
     setSocket(nextSocket);
-    const refresh = (payload: { projectId: string }) => { if (payload.projectId === projectId) void loadProject(projectId); };
+    const refresh = (payload: { projectId: string }) => { if (payload.projectId === selectedProjectRef.current) void loadProject(payload.projectId); };
     nextSocket.on("connect", () => setServerMode("live"));
     nextSocket.on("connect_error", () => setServerMode("connecting"));
     nextSocket.on("QUEUE_UPDATED", refresh);
@@ -286,7 +288,13 @@ function Workspace() {
     nextSocket.on("MEMBER_APPEARANCE_CHANGED", refresh);
     nextSocket.on("ERROR", ({ message: error }) => toast(error, "warning"));
     return () => { mounted = false; nextSocket.disconnect(); };
-    // The socket is intentionally bound to the selected project lifecycle.
+    // Runs once for the lifetime of the session; per-project data loading is
+    // handled by the effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (projectId) void loadProject(projectId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
@@ -394,7 +402,7 @@ function Workspace() {
 
           <div className="workspace-columns grid min-h-0 flex-1 grid-cols-1" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties}>
             <section className="relative flex min-h-[700px] min-w-0 flex-col border-r border-zinc-200/80 lg:min-h-0">
-              <QueueHeader active={active} pendingCount={pending.length} />
+              <QueueHeader pendingCount={pending.length} />
               <div className="fine-scrollbar flex-1 overflow-y-auto px-4 pb-44 pt-2 sm:px-6 lg:px-8">
                 <div className="mx-auto max-w-3xl space-y-3">
                   {conversation.length ? conversation.map((item) => {
@@ -443,18 +451,8 @@ function Workspace() {
   );
 }
 
-function LoginScreen({ onSignedIn }: { onSignedIn: () => void }) {
-  const [username, setUsername] = useState("alice");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+function LoginScreen() {
   const oauthError = new URLSearchParams(window.location.search).get("error");
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setLoading(true); setError("");
-    try { await loginWithUsername(username); onSignedIn(); }
-    catch { setError("Use a project username such as alice, bob, or charlie."); }
-    finally { setLoading(false); }
-  };
   return <div className="grid min-h-screen place-items-center bg-[#f4f4f2] p-5">
     <div className="enter-up w-full max-w-[420px] overflow-hidden rounded-[24px] border border-zinc-200 bg-white shadow-float">
       <div className="border-b border-zinc-100 px-7 pb-7 pt-8">
@@ -462,16 +460,10 @@ function LoginScreen({ onSignedIn }: { onSignedIn: () => void }) {
         <h1 className="mt-6 text-[28px] font-semibold tracking-[-0.045em]">Welcome to Relaycode</h1>
         <p className="mt-2 text-[12px] leading-5 text-zinc-500">Sign in to collaborate on repositories your GitHub account can access.</p>
       </div>
-      <div className="px-7 pt-7">
+      <div className="px-7 py-7">
         {oauthError && <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-[10px] leading-4 text-red-700">{oauthError}</div>}
         <button onClick={beginGithubLogin} className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-zinc-950 text-[11px] font-medium text-white transition hover:bg-zinc-800"><Github size={15} /> Continue with GitHub</button>
-        <div className="my-5 flex items-center gap-3 text-[9px] uppercase tracking-[.12em] text-zinc-300"><span className="h-px flex-1 bg-zinc-100" />Local demo<span className="h-px flex-1 bg-zinc-100" /></div>
       </div>
-      <form onSubmit={submit} className="px-7 pb-7">
-        <Field label="Demo username"><div className="relative"><UserRound size={14} className="absolute left-3 top-3.5 text-zinc-400" /><input value={username} onChange={(event) => setUsername(event.target.value)} className={cx(fieldClass, "pl-9")} placeholder="alice" /></div></Field>
-        {error && <p className="mt-2 text-[10px] text-red-600">{error}</p>}
-        <button disabled={!username.trim() || loading} className="mt-4 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-zinc-200 text-[10px] font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:text-zinc-300">{loading ? <LoaderCircle size={14} className="animate-spin" /> : <ArrowUpRight size={14} />} Enter local demo</button>
-      </form>
     </div>
   </div>;
 }
@@ -482,23 +474,38 @@ function ProjectSidebar({ projects, user, companion, selectedId, open, collapsed
     <aside className={cx("fixed inset-y-0 left-0 z-50 flex w-[276px] flex-col border-r border-zinc-200 bg-[#f7f7f5] p-3 shadow-float transition-[transform,width] duration-300 lg:static lg:z-auto lg:translate-x-0 lg:shadow-none", collapsed ? "lg:w-[72px]" : "lg:w-[248px] 2xl:w-[270px]", open ? "translate-x-0" : "-translate-x-[110%]") }>
       <div className="relative flex items-center justify-between px-2 py-2.5">
         <div className="flex items-center gap-2.5">
-          <div className="grid size-8 place-items-center rounded-[10px] bg-zinc-950 text-white"><Zap size={15} fill="currentColor" /></div>
+          <button
+            aria-label={collapsed ? "Expand project navigation" : "Relaycode"}
+            title={collapsed ? "Expand sidebar" : undefined}
+            onClick={collapsed ? onToggleCollapsed : undefined}
+            className={cx("grid size-8 place-items-center rounded-[10px] bg-zinc-950 text-white", collapsed && "cursor-pointer transition hover:bg-zinc-800")}
+          >
+            <Zap size={15} fill="currentColor" />
+          </button>
           <span className={cx("text-[15px] font-semibold tracking-[-0.02em]", collapsed && "lg:hidden")}>Relaycode</span>
         </div>
         <button aria-label="Close navigation" className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-200 lg:hidden" onClick={onClose}><X size={17} /></button>
-        <button aria-label={collapsed ? "Expand project navigation" : "Collapse project navigation"} title={collapsed ? "Expand sidebar" : "Collapse sidebar"} className={cx("hidden rounded-lg p-1.5 text-zinc-400 transition hover:bg-zinc-200 hover:text-zinc-700 lg:block", collapsed && "absolute left-[54px] border border-zinc-200 bg-white shadow-sm")} onClick={onToggleCollapsed}><ChevronRight size={14} className={cx("transition-transform", !collapsed && "rotate-180")} /></button>
+        {!collapsed && <button aria-label="Collapse project navigation" title="Collapse sidebar" className="hidden rounded-lg p-1.5 text-zinc-400 transition hover:bg-zinc-200 hover:text-zinc-700 lg:block" onClick={onToggleCollapsed}><ChevronRight size={14} className="rotate-180" /></button>}
       </div>
-
-      <button title="Search requests" className={cx("mt-3 flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-left text-[12px] text-zinc-500 shadow-sm transition hover:border-zinc-300", collapsed && "lg:justify-center lg:px-0")}><Search size={14} /><span className={cx(collapsed && "lg:hidden")}>Search requests</span><kbd className={cx("ml-auto rounded border border-zinc-200 px-1.5 py-0.5 font-mono text-[9px]", collapsed && "lg:hidden")}>⌘K</kbd></button>
 
       <div className={cx("mt-7 flex items-center justify-between px-2", collapsed && "lg:justify-center lg:px-0")}>
         <span className={cx("text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-400", collapsed && "lg:hidden")}>Projects</span>
         <button aria-label="Create project" onClick={onCreateProject} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700"><Plus size={14} /></button>
       </div>
       <nav className="mt-2 flex flex-col gap-1">
-        {projects.map((project) => <button key={project.id} title={collapsed ? project.name : undefined} onClick={() => onSelect(project.id)} className={cx("group relative flex items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition", collapsed && "lg:justify-center lg:px-0", selectedId === project.id ? "bg-white text-zinc-950 shadow-sm ring-1 ring-zinc-200" : "text-zinc-600 hover:bg-zinc-200/60")}>
+        {projects.map((project) => <button key={project.id} title={collapsed ? project.name : undefined} onClick={() => onSelect(project.id)} className={cx("group relative flex items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition", collapsed && "lg:justify-center lg:px-0", selectedId === project.id ? cx("text-zinc-950", !collapsed && "bg-white shadow-sm ring-1 ring-zinc-200") : "text-zinc-600 hover:bg-zinc-200/60")}>
           <div className={cx("grid size-8 shrink-0 place-items-center rounded-lg border text-[11px] font-semibold", selectedId === project.id ? "border-zinc-800 bg-zinc-900 text-white" : "border-zinc-200 bg-white text-zinc-500")}>{project.name.split(" ").map((word) => word[0]).join("").slice(0, 2)}</div>
-          <div className={cx("min-w-0 flex-1", collapsed && "lg:hidden")}><div className="truncate text-[12px] font-medium">{project.name}</div><div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-zinc-400"><GitBranch size={10} /> {project.branch}</div></div>
+          <div className={cx("min-w-0 flex-1", collapsed && "lg:hidden")}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-[12px] font-medium">{project.name}</span>
+              {project.lastMessage && <span className="shrink-0 text-[9px] text-zinc-400">{when(project.lastMessage.createdAt)}</span>}
+            </div>
+            <div className="mt-0.5 flex items-center gap-1 text-[10px] text-zinc-400">
+              <UsersRound size={10} className="shrink-0" />
+              <span className="shrink-0">{project.memberCount ?? project.members.length}</span>
+              {project.lastMessage && <span className="truncate">· {project.lastMessage.authorName}: {project.lastMessage.body}</span>}
+            </div>
+          </div>
           {project.onlineCount > 0 && <span className={cx("flex items-center gap-1 text-[9px] text-zinc-400", collapsed && "lg:absolute lg:bottom-1.5 lg:right-1.5")}><span className="size-1.5 rounded-full bg-emerald-500" /><span className={cx(collapsed && "lg:hidden")}>{project.onlineCount}</span></span>}
         </button>)}
       </nav>
@@ -524,8 +531,8 @@ function ProjectHeader({ project, mode, onMenu, onProjectSettings, onShare }: { 
       <button aria-label="Open projects" className="rounded-lg p-2 text-zinc-600 hover:bg-zinc-100 lg:hidden" onClick={onMenu}><Menu size={19} /></button>
       <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-zinc-950 text-[11px] font-semibold text-white">{project.name.split(" ").map((word) => word[0]).join("").slice(0, 2).toUpperCase()}</div>
       <div className="min-w-0">
-        <div className="flex items-center gap-2"><h1 className="truncate text-[15px] font-semibold tracking-[-0.02em]">{project.name}</h1><ChevronDown size={14} className="text-zinc-400" /></div>
-        <div className="mt-1 flex items-center gap-1.5 text-[10px] text-zinc-400"><Github size={11} /><span className="truncate">{project.repositoryOwner}/{project.repositoryName}</span><span>·</span><GitBranch size={10} />{project.branch}</div>
+        <h1 className="truncate text-[15px] font-semibold tracking-[-0.02em]">{project.name}</h1>
+        <div className="mt-1 flex items-center gap-1.5 text-[12px] text-zinc-400"><Github size={14} /><span className="truncate">{project.repositoryOwner}/{project.repositoryName}</span><span>·</span><GitBranch size={13} />{project.branch}</div>
       </div>
     </div>
     <div className="flex items-center gap-2">
@@ -541,13 +548,10 @@ function ProjectHeader({ project, mode, onMenu, onProjectSettings, onShare }: { 
   </header>;
 }
 
-function QueueHeader({ active, pendingCount }: { active: Task | null; pendingCount: number }) {
+function QueueHeader({ pendingCount }: { pendingCount: number }) {
   return <div className="flex shrink-0 items-center justify-between px-4 pb-3 pt-5 sm:px-6 lg:px-8">
-    <div><h2 className="text-[19px] font-semibold tracking-[-0.035em]">Project conversation</h2><p className="mt-1 text-[11px] text-zinc-400">Requests stay in chat order. Queue badges show execution order.</p></div>
-    <div className="flex items-center gap-3">
-      <div className="hidden text-right sm:block"><div className="text-[10px] font-medium text-zinc-700">{active ? `#${active.number} active` : "Ready"}</div><div className="mt-0.5 text-[9px] text-zinc-400">{pendingCount} waiting</div></div>
-      <div className="grid size-9 place-items-center rounded-xl bg-zinc-100 text-zinc-600"><ListOrdered size={16} /></div>
-    </div>
+    <h2 className="text-[19px] font-semibold tracking-[-0.035em]">Project conversation</h2>
+    <div className="hidden items-center gap-1.5 text-[12px] font-medium text-zinc-500 sm:flex"><Clock3 size={14} />{pendingCount} waiting</div>
   </div>;
 }
 
@@ -663,23 +667,36 @@ function DiffViewer({ diff }: { diff: StoredDiff }) {
 
 function EmptyQueue() { return <div className="rounded-2xl border border-dashed border-zinc-200 py-9 text-center"><CheckCircle2 className="mx-auto text-zinc-300" size={22} /><div className="mt-2 text-[12px] font-medium text-zinc-500">Start the conversation</div><p className="mt-1 text-[10px] text-zinc-400">Message your team or send the agent a coding request.</p></div>; }
 
+const AGENT_TRIGGER = /^\/agent\b\s*/i;
+
+function HighlightedComposerText({ text }: { text: string }) {
+  const match = AGENT_TRIGGER.exec(text);
+  if (!match) return <>{text}</>;
+  const rest = text.slice(match[0].length);
+  const trailingSpace = match[0].slice("/agent".length);
+  return <><span className="rounded-full bg-blue-500/15 px-1.5 text-blue-600">/agent</span>{trailingSpace}{rest}</>;
+}
+
 const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: User; replyTask: Task | null; serverMode: "connecting" | "live" | "demo"; socket: AppSocket | null; onCancelReply: () => void; onCreated: (task: Task) => void; onAttached: (result: AttachedRequestResult) => void; onMessageCreated: (message: Message) => void }>(function Composer({ project, user, replyTask, serverMode, socket, onCancelReply, onCreated, onAttached, onMessageCreated }, ref) {
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
   const [explicit, setExplicit] = useState(true);
-  const [mode, setMode] = useState<"agent" | "team">("agent");
   const [error, setError] = useState("");
-  useEffect(() => { if (replyTask) setMode("agent"); }, [replyTask]);
+  const backdropRef = useRef<HTMLDivElement>(null);
+  const isAgentMode = Boolean(replyTask) || AGENT_TRIGGER.test(body);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (!body.trim() || sending) return;
     setSending(true); setError("");
-    const text = body.trim();
+    const raw = body.trim();
+    const agentMatch = AGENT_TRIGGER.exec(raw);
+    const text = agentMatch ? raw.slice(agentMatch[0].length).trim() : raw;
     try {
       if (serverMode !== "live") throw new Error("Relaycode is reconnecting. Try again in a moment.");
-      if (mode === "team" && !replyTask) {
+      if (!replyTask && !agentMatch) {
         const created = await api<Message>(`/api/projects/${project.id}/messages`, { method: "POST", body: JSON.stringify({ body: text }) });
         onMessageCreated(created);
       } else {
+        if (!text) throw new Error("Add a description after /agent.");
         const created = await api<Task | AttachedRequestResult>(replyTask ? "/api/refinements" : "/api/requests", { method: "POST", body: JSON.stringify(replyTask ? { projectId: project.id, parentTaskId: replyTask.id, body: text, explicit } : { projectId: project.id, body: text }) });
         if ("kind" in created) onAttached(created);
         else onCreated(created);
@@ -691,17 +708,25 @@ const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: U
   };
   return <form onSubmit={submit} className="absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-white via-white to-transparent px-4 pb-4 pt-10 sm:px-6 lg:px-8">
     <div className="overflow-hidden rounded-[17px] border border-zinc-300 bg-white shadow-[0_16px_50px_rgba(24,24,27,.12)] transition focus-within:border-zinc-500 focus-within:ring-2 focus-within:ring-zinc-100">
-      {!replyTask && <div className="flex items-center gap-1 border-b border-zinc-100 px-3 pt-2.5">
-        <button type="button" onClick={() => setMode("team")} className={cx("flex items-center gap-1.5 rounded-t-lg px-3 py-2 text-[10px] font-medium transition", mode === "team" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-700")}><UsersRound size={12} /> Team message</button>
-        <button type="button" onClick={() => setMode("agent")} className={cx("flex items-center gap-1.5 rounded-t-lg px-3 py-2 text-[10px] font-medium transition", mode === "agent" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-700")}><Bot size={12} /> Agent request</button>
-      </div>}
       {replyTask && <div className="flex items-center gap-2 border-b border-zinc-100 bg-amber-50/70 px-3.5 py-2 text-[10px]"><MessageSquareReply size={12} className="text-amber-700" /><span className="font-medium text-amber-900">Refining Request #{replyTask.number}</span><span className="min-w-0 flex-1 truncate text-amber-700/70">{replyTask.rootMessage?.body}</span><label className="hidden items-center gap-1.5 text-[9px] text-amber-800 sm:flex"><input checked={explicit} onChange={(event) => setExplicit(event.target.checked)} type="checkbox" className="accent-zinc-900" /> Explicit reply</label><button type="button" onClick={onCancelReply} className="rounded p-1 text-amber-700 hover:bg-amber-100"><X size={12} /></button></div>}
-      <textarea ref={ref} value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={2} placeholder={replyTask ? "Describe the change to this request…" : mode === "team" ? "Message everyone in this project…" : "Ask the agent to build something…"} className="block max-h-36 min-h-[66px] w-full resize-none bg-transparent px-4 pb-2 pt-3 text-[12px] leading-5 outline-none placeholder:text-zinc-400" />
+      <div className="relative">
+        <div ref={backdropRef} aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-4 pb-2 pt-3 text-[12px] leading-5 text-zinc-900">
+          <HighlightedComposerText text={body} />
+        </div>
+        <textarea
+          ref={ref}
+          value={body}
+          onChange={(event) => setBody(event.target.value)}
+          onScroll={(event) => { if (backdropRef.current) backdropRef.current.scrollTop = event.currentTarget.scrollTop; }}
+          onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}
+          rows={2}
+          placeholder={replyTask ? "Describe the change to this request…" : "Message the team, or start with /agent to create a request…"}
+          className="relative block max-h-36 min-h-[66px] w-full resize-none bg-transparent px-4 pb-2 pt-3 text-[12px] leading-5 text-transparent caret-zinc-900 outline-none placeholder:text-zinc-400"
+        />
+      </div>
       {error && <div className="mx-3 mb-2 rounded-lg bg-red-50 px-2.5 py-2 text-[10px] text-red-700">{error}</div>}
       <div className="flex items-center gap-2 px-3 pb-3">
-        {mode === "agent" && <button type="button" className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-2 py-1.5 text-[9px] font-medium text-zinc-500 hover:bg-zinc-50"><Plus size={11} /> Attach context</button>}
-        <span className="hidden text-[9px] text-zinc-400 sm:inline">{mode === "team" && !replyTask ? "Visible to project members only · the agent cannot read it" : "Creates a task on your connected companion"}</span>
-        <button disabled={!body.trim() || sending} className="ml-auto grid size-8 place-items-center rounded-[10px] bg-zinc-950 text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400" aria-label={mode === "team" && !replyTask ? "Send team message" : "Submit agent request"}>{sending ? <LoaderCircle size={14} className="animate-spin" /> : <Send size={13} />}</button>
+        <button disabled={!body.trim() || sending} className="ml-auto grid size-8 place-items-center rounded-[10px] bg-zinc-950 text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400" aria-label={isAgentMode ? "Submit agent request" : "Send team message"}>{sending ? <LoaderCircle size={14} className="animate-spin" /> : <Send size={13} />}</button>
       </div>
     </div>
   </form>;
@@ -736,16 +761,13 @@ function PreviewPanel({ project, processes, mode }: { project: ProjectItem; proc
   return <div className="fine-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto">
     <div className="flex items-center justify-between px-5 py-3">
       <div className="flex items-center gap-2"><span className={cx("size-2 rounded-full", previewUrl ? "bg-emerald-500" : failed ? "bg-red-500" : starting ? "bg-amber-400 pulse-soft" : "bg-zinc-300")} /><span className="text-[10px] font-medium">{previewUrl ? "Preview running" : failed ? "Preview failed" : starting ? "Starting preview…" : "Preview stopped"}</span></div>
-      <div className="flex items-center gap-1"><button onClick={() => setViewport("desktop")} className={cx("rounded-md p-1.5", viewport === "desktop" ? "bg-zinc-200 text-zinc-800" : "text-zinc-400")}><MonitorPlay size={13} /></button><button onClick={() => setViewport("mobile")} className={cx("rounded-md p-1.5 text-[9px] font-semibold", viewport === "mobile" ? "bg-zinc-200 text-zinc-800" : "text-zinc-400")}>M</button><button onClick={() => void togglePreview()} className="ml-1 rounded-md p-1.5 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700">{running ? <Square size={11} fill="currentColor" /> : <Play size={12} fill="currentColor" />}</button></div>
+      <div className="flex items-center gap-1"><button title="Desktop" onClick={() => setViewport("desktop")} className={cx("rounded-md p-1.5", viewport === "desktop" ? "bg-zinc-200 text-zinc-800" : "text-zinc-400")}><Laptop2 size={14} /></button><button title="Mobile" onClick={() => setViewport("mobile")} className={cx("rounded-md p-1.5", viewport === "mobile" ? "bg-zinc-200 text-zinc-800" : "text-zinc-400")}><Smartphone size={14} /></button><button title={running ? "Stop preview" : "Start preview"} onClick={() => void togglePreview()} className={cx("ml-1 rounded-md p-1.5 transition", running ? "text-red-600 hover:bg-red-50 hover:text-red-700" : "text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700")}>{running ? <Square size={11} fill="currentColor" /> : <Play size={12} fill="currentColor" />}</button></div>
     </div>
-    <div className="mx-4 rounded-xl border border-zinc-200 bg-white p-1 shadow-sm">
+    <div className={cx("rounded-xl border border-zinc-200 bg-white p-1 shadow-sm transition-all duration-300", viewport === "mobile" ? "mx-auto w-[230px]" : "mx-4")}>
       <div className="flex h-8 items-center gap-2 rounded-t-lg border-b border-zinc-100 px-2.5"><div className="flex gap-1"><i className="size-1.5 rounded-full bg-red-300" /><i className="size-1.5 rounded-full bg-amber-300" /><i className="size-1.5 rounded-full bg-emerald-300" /></div><div className="flex flex-1 items-center gap-1.5 rounded-md bg-zinc-100 px-2 py-1 font-mono text-[8px] text-zinc-400"><ShieldCheck size={8} />{previewUrl ?? "Waiting for local URL"}</div><RefreshCw size={10} className="text-zinc-400" /></div>
-      <div className={cx("mx-auto min-h-[280px] overflow-hidden bg-[#f8f7f3] transition-all duration-300", viewport === "mobile" ? "w-[210px] border-x border-zinc-100" : "w-full")}>
-        {previewUrl ? <iframe title={`${project.name} local preview`} src={previewUrl} className="h-[280px] w-full border-0 bg-white" sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts" /> : <div className="grid min-h-[280px] place-items-center"><div className="text-center"><CirclePause size={23} className="mx-auto text-zinc-300" /><p className="mt-2 text-[10px] font-medium text-zinc-500">{starting ? "Waiting for the development server…" : "Preview stopped"}</p></div></div>}
+      <div className={cx("w-full overflow-hidden bg-[#f8f7f3] transition-all duration-300", viewport === "mobile" ? "h-[460px]" : "h-[280px]")}>
+        {previewUrl ? <iframe title={`${project.name} local preview`} src={previewUrl} className="h-full w-full border-0 bg-white" sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts" /> : <div className="grid h-full place-items-center"><div className="text-center"><CirclePause size={23} className="mx-auto text-zinc-300" /><p className="mt-2 text-[10px] font-medium text-zinc-500">{starting ? "Waiting for the development server…" : "Preview stopped"}</p></div></div>}
       </div>
-    </div>
-    <div className="mx-5 mt-3 flex items-center gap-2 rounded-xl bg-white px-3 py-2.5 ring-1 ring-zinc-200">
-      <Globe2 size={13} className="text-zinc-400" /><div className="min-w-0 flex-1"><div className="text-[9px] text-zinc-400">Served from your machine</div><span className="block truncate font-mono text-[9px] font-medium text-zinc-700">{previewUrl ?? "Start preview to discover its URL"}</span></div>{previewUrl && <a href={previewUrl} target="_blank" rel="noreferrer" className="rounded-lg bg-zinc-950 px-2.5 py-1.5 text-[9px] font-medium text-white">Open</a>}
     </div>
     <div className="mx-5 mt-4 space-y-2 pb-5">
       <div className="text-[9px] font-semibold uppercase tracking-[.12em] text-zinc-400">Local processes</div>
@@ -761,7 +783,6 @@ function ActivityPanel({ activity }: { activity: Activity[] }) {
   }, [activity.length]);
   const categoryColor: Record<string, string> = { REQUEST: "text-blue-300", GIT: "text-violet-300", AGENT: "text-amber-300", REFINE: "text-orange-300", TEST: "text-emerald-300", SYNC: "text-cyan-300", TASK: "text-zinc-100" };
   return <div className="flex min-h-0 flex-1 flex-col bg-[#151515] text-zinc-300">
-    <div className="flex items-center justify-between border-b border-white/10 px-4 py-3"><div className="flex items-center gap-2 text-[10px] font-medium text-zinc-200"><TerminalSquare size={13} /> Project activity</div><div className="flex items-center gap-1.5 font-mono text-[8px] text-zinc-500"><span className="size-1.5 rounded-full bg-emerald-400 pulse-soft" /> streaming</div></div>
     <div className="fine-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono text-[9px] leading-6">
       {activity.map((event) => {
         const date = new Date(event.createdAt); const user = event.user?.username ?? (event.userId || "system");
@@ -769,7 +790,6 @@ function ActivityPanel({ activity }: { activity: Activity[] }) {
       })}
       <div ref={bottom} />
     </div>
-    <div className="flex items-center gap-2 border-t border-white/10 px-4 py-2.5 font-mono text-[8px] text-zinc-500"><Circle size={7} fill="currentColor" className="text-emerald-400" /> secrets redacted · logs retained centrally</div>
   </div>;
 }
 
@@ -788,8 +808,8 @@ function Modal({ children, onClose, width = "max-w-xl" }: { children: ReactNode;
   return <div className="fixed inset-0 z-[80] grid place-items-center bg-zinc-950/30 p-3 backdrop-blur-[2px]" role="dialog" aria-modal="true" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className={cx("enter-up fine-scrollbar max-h-[calc(100vh-24px)] w-full overflow-y-auto rounded-[22px] border border-white/80 bg-white shadow-float", width)}>{children}</div></div>;
 }
 
-function ModalHeader({ icon, title, description, onClose }: { icon: ReactNode; title: string; description: string; onClose: () => void }) {
-  return <div className="flex items-start gap-3 border-b border-zinc-100 px-5 py-5 sm:px-6"><div className="grid size-9 shrink-0 place-items-center rounded-xl bg-zinc-100 text-zinc-700">{icon}</div><div><h3 className="text-[15px] font-semibold tracking-tight">{title}</h3><p className="mt-1 text-[10px] leading-4 text-zinc-400">{description}</p></div><button onClick={onClose} className="ml-auto rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-100"><X size={17} /></button></div>;
+function ModalHeader({ icon, title, description, onClose }: { icon: ReactNode; title: string; description?: string; onClose: () => void }) {
+  return <div className="flex items-start gap-3 border-b border-zinc-100 px-5 py-5 sm:px-6"><div className="grid size-9 shrink-0 place-items-center rounded-xl bg-zinc-100 text-zinc-700">{icon}</div><div><h3 className="text-[15px] font-semibold tracking-tight">{title}</h3>{description && <p className="mt-1 text-[10px] leading-4 text-zinc-400">{description}</p>}</div><button onClick={onClose} className="ml-auto rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-100"><X size={17} /></button></div>;
 }
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) { return <label className="block"><span className="text-[10px] font-semibold text-zinc-700">{label}</span>{hint && <span className="ml-2 text-[9px] text-zinc-400">{hint}</span>}<div className="mt-1.5">{children}</div></label>; }
@@ -892,7 +912,7 @@ function ProjectSettingsModal({ project, onClose, onInitialize, onSave }: { proj
       setDetectingCommands(false);
     }
   };
-  return <Modal onClose={onClose} width="max-w-2xl"><ModalHeader icon={<Settings size={16} />} title="Project settings" description="Repository rules, agent models, tool permissions, and local commands." onClose={onClose} />
+  return <Modal onClose={onClose} width="max-w-2xl"><ModalHeader icon={<Settings size={16} />} title="Project settings" onClose={onClose} />
     <div className="flex border-b border-zinc-100 px-5 sm:px-6">{(["repository", "agent", "commands"] as const).map((item) => <button key={item} onClick={() => setTab(item)} className={cx("relative px-3 py-3 text-[10px] font-medium capitalize", tab === item ? "text-zinc-900" : "text-zinc-400")}>{item}{tab === item && <span className="absolute inset-x-2 bottom-0 h-[2px] bg-zinc-900" />}</button>)}</div>
     <div className="min-h-[370px] p-5 sm:p-6">
       {tab === "repository" && <div className="space-y-5"><div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4"><div className="flex items-center gap-2 text-[11px] font-semibold"><Github size={15} /> {project.repositoryOwner}/{project.repositoryName}<span className="ml-auto flex items-center gap-1 text-[9px] font-medium text-emerald-700"><CheckCircle2 size={11} /> Write access verified</span></div><p className="mt-2 text-[9px] leading-4 text-zinc-500">The remote branch is the source of truth. Every companion hard-resets tracked files before execution.</p></div><div className="grid gap-4 sm:grid-cols-2"><Field label="Repository owner"><input disabled value={project.repositoryOwner} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field><Field label="Repository"><input disabled value={project.repositoryName} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field></div><Field label="Configured branch" hint="History rewriting must be allowed for rollback"><div className="relative"><GitBranch size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft.branch} onChange={(event) => setDraft({ ...draft, branch: event.target.value })} className={cx(fieldClass, "pl-9")} /></div></Field><div className="flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[9px] leading-4 text-amber-900"><AlertTriangle size={14} className="mt-0.5 shrink-0" /> Destructive rollback rewrites this branch with force-with-lease. Protected branches may reject the operation safely.</div></div>}
