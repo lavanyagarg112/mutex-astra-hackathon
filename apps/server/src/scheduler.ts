@@ -12,15 +12,6 @@ const ACTIVE = activeStatuses as TaskStatus[];
 const MISSING_AGENT_KEY = "No OpenAI key is configured for this project. A project owner must add the shared key in Project settings → Agent before coding requests can run.";
 const COORDINATOR_MERGE_CONFIDENCE = 0.7;
 
-function legacyCompanionGitSafetyGuidance(branch: string): string {
-  return [
-    "Execution constraint (not a product requirement): inspect only tracked application files returned by list_files.",
-    ".git and all of its contents are private implementation details: never read or write .git/config, .git/HEAD, refs, logs, objects, or any other .git path.",
-    `The checkout is already synchronized to the configured ${branch} branch; do not guess master or inspect branch-reference files.`,
-    "If a requested file does not exist, use list_files and continue with an existing tracked file instead of retrying a guessed path.",
-  ].join(" ");
-}
-
 function usesSharedOpenAI(developerModel: string): boolean {
   return !["demo", "command"].includes(developerModel);
 }
@@ -574,9 +565,6 @@ export class Scheduler {
       if (!claimed.count) continue;
       const refreshed = await this.prisma.task.findUniqueOrThrow({ where: { id: task.id }, include: fullTaskInclude });
       const refinements = refreshed.taskMessages.filter((link) => link.messageId !== refreshed.rootMessageId).map((link) => link.message.body);
-      const dispatchedRefinements = usesSharedOpenAI(project.developerModel)
-        ? [legacyCompanionGitSafetyGuidance(project.branch), ...refinements]
-        : refinements;
       const serializedProject = serializeProject(project);
       // Companions released before executionMode existed still insist on a test
       // command for every task. Give only those initialization dispatches a
@@ -593,7 +581,7 @@ export class Scheduler {
         task: serializeTask(refreshed) as any,
         project: dispatchedProject as any,
         request: refreshed.rootMessage.body,
-        refinements: dispatchedRefinements,
+        refinements,
         ...(project.agentCredential ? { agentCredential: project.agentCredential } : {}),
       });
       if (!emitted) {

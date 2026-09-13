@@ -261,7 +261,7 @@ export class OpenAIAgentProvider extends BaseAgentProvider {
     let nextInput: unknown = [
       {
         role: "developer",
-        content: `You are the developer agent for a local Git checkout synchronized to the configured ${context.payload.project.branch} branch. Implement the request completely. Inspect tracked project files with list_files before editing, keep changes scoped, use tools for all filesystem actions, and finish only when the implementation is ready to commit. Never inspect or edit .git, secrets, or Git credentials.`,
+        content: "You are the developer agent for a local Git checkout. Implement the request completely. Inspect files before editing, keep changes scoped, use tools for all filesystem/shell actions, and finish only when the implementation is ready to commit. Never access secrets or Git credentials.",
       },
       {
         role: "user",
@@ -289,18 +289,7 @@ export class OpenAIAgentProvider extends BaseAgentProvider {
       for (const call of calls) {
         await context.pauseGate.wait(context.signal);
         const args = parseToolArguments(call.arguments);
-        let result: unknown;
-        try {
-          result = await this.executeTool(call.name!, args, context);
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException)?.code;
-          result = {
-            ok: false,
-            error: code === "ENOENT"
-              ? "The requested file does not exist. Use list_files and continue with an existing tracked project file."
-              : sanitizeText(error instanceof Error ? error.message : String(error)).slice(0, 1_000),
-          };
-        }
+        const result = await this.executeTool(call.name!, args, context);
         toolResults.push({ type: "function_call_output", call_id: call.call_id!, output: JSON.stringify(result) });
       }
       const amendments = this.drainAmendments();
@@ -409,7 +398,6 @@ async function safeRepositoryPath(root: string, userPath: string, allowMissing: 
   const candidate = resolve(canonicalRoot, userPath);
   const lexicalRelative = relative(canonicalRoot, candidate);
   if (lexicalRelative.startsWith("..") || lexicalRelative === "") throw new Error("File path escapes the repository.");
-  if (lexicalRelative.split(sep)[0] === ".git") throw new Error("Git internal files are not available to the developer agent. Use list_files to inspect tracked project files.");
   if (!allowMissing) {
     const canonical = await realpath(candidate);
     if (!canonical.startsWith(`${canonicalRoot}${sep}`)) throw new Error("File path resolves outside the repository.");
