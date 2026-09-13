@@ -285,7 +285,7 @@ export class DaemonRuntime {
     const execution = this.active.get(payload.projectId);
     if (!execution || execution.payload.task.id !== payload.taskId || !execution.amendable) return;
     execution.provider.amend(payload.body, payload.authorName);
-    this.output(payload.projectId, payload.taskId, "AGENT", `Accepted in-flight refinement from ${payload.authorName}.`);
+    this.output(payload.projectId, payload.taskId, "AGENT", payload.kind === "COMBINED_REQUEST" ? `Combined a related request from ${payload.authorName} into the active task.` : `Accepted in-flight refinement from ${payload.authorName}.`);
   }
 
   private pauseTask(projectId: string, taskId: string): void {

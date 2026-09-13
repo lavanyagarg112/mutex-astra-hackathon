@@ -10,6 +10,8 @@ export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
 export const TaskTypeSchema = z.enum(["NORMAL", "REFINEMENT"]);
 export type TaskType = z.infer<typeof TaskTypeSchema>;
+export const TaskMessageRoleSchema = z.enum(["INITIAL", "COMBINED_REQUEST", "IN_FLIGHT_REFINEMENT"]);
+export type TaskMessageRole = z.infer<typeof TaskMessageRoleSchema>;
 export const TaskExecutionModeSchema = z.enum(["NORMAL", "INITIALIZATION"]);
 export type TaskExecutionMode = z.infer<typeof TaskExecutionModeSchema>;
 export const RepositoryInitializationSchema = z.object({
@@ -44,7 +46,7 @@ export const MemberInteractionSchema = z.object({
 
 export const MessageSchema = z.object({
   id: z.string(), projectId: z.string(), authorId: z.string(), body: z.string().min(1).max(10_000),
-  replyToMessageId: z.string().nullable(), createdAt: z.string(), author: UserSchema.optional(),
+  replyToMessageId: z.string().nullable(), createdAt: z.string(), author: UserSchema.optional(), taskRole: TaskMessageRoleSchema.optional(),
 });
 export type Message = z.infer<typeof MessageSchema>;
 
@@ -139,7 +141,7 @@ export const RollbackResultSchema = z.discriminatedUnion("ok", [
 
 /** agentCredential is delivered only to the assigned daemon and is never part of serialized Project data. */
 export type StartTaskPayload = { task: Task; project: Project; request: string; refinements: string[]; agentCredential?: string };
-export type AmendTaskPayload = { taskId: string; projectId: string; messageId: string; body: string; authorName: string };
+export type AmendTaskPayload = { taskId: string; projectId: string; messageId: string; body: string; authorName: string; kind: "COMBINED_REQUEST" | "IN_FLIGHT_REFINEMENT" };
 export type SyncProjectPayload = { projectId: string; repositoryUrl: string; branch: string };
 export type StartRollbackPayload = { projectId: string; repositoryUrl: string; branch: string; targetSha: string; rollbackTaskId: string; affectedTaskIds: string[] };
 

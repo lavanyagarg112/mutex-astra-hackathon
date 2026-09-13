@@ -35,7 +35,7 @@ type TaskWithRelations = Task & {
   rootMessage?: Message & { author?: User };
   requestedBy?: User;
   executor?: User | null;
-  taskMessages?: Array<{ role: "INITIAL" | "IN_FLIGHT_REFINEMENT"; message: Message & { author?: User } }>;
+  taskMessages?: Array<{ role: "INITIAL" | "COMBINED_REQUEST" | "IN_FLIGHT_REFINEMENT"; message: Message & { author?: User } }>;
   parentTask?: (Task & { rootMessage: Message }) | null;
 };
 
@@ -66,7 +66,7 @@ export function serializeTask(task: TaskWithRelations) {
     ...(task.rootMessage ? { rootMessage: serializeMessage(task.rootMessage) } : {}),
     ...(task.requestedBy ? { requestedBy: serializeUser(task.requestedBy) } : {}),
     ...(task.executor !== undefined ? { executor: task.executor ? serializeUser(task.executor) : null } : {}),
-    ...(task.taskMessages ? { messages: task.taskMessages.filter((link) => link.role === "IN_FLIGHT_REFINEMENT").map((link) => serializeMessage(link.message)) } : {}),
+    ...(task.taskMessages ? { messages: task.taskMessages.filter((link) => link.role !== "INITIAL").map((link) => ({ ...serializeMessage(link.message), taskRole: link.role })) } : {}),
     ...(task.parentTask !== undefined
       ? { parentTask: task.parentTask ? { number: task.parentTask.number, rootMessage: { body: task.parentTask.rootMessage.body } } : null }
       : {}),

@@ -45,7 +45,7 @@ export class Scheduler {
       include: {
         rootMessage: true,
         taskMessages: {
-          where: { role: "IN_FLIGHT_REFINEMENT" },
+          where: { role: { in: ["COMBINED_REQUEST", "IN_FLIGHT_REFINEMENT"] } },
           include: { message: true },
         },
       },
@@ -65,8 +65,8 @@ export class Scheduler {
             model: project.coordinatorModel,
           })
         : { kind: "INDEPENDENT" as const, confidence: 0, reason: "No shared OpenAI credential configured" };
-      if (decision.kind === "REFINEMENT" && decision.confidence >= COORDINATOR_MERGE_CONFIDENCE) {
-        return this.attachInFlightRefinement(userId, active.id, body);
+      if (decision.kind === "COMBINE" && decision.confidence >= COORDINATOR_MERGE_CONFIDENCE) {
+        return this.attachToActiveTask(userId, active.id, body, "COMBINED_REQUEST");
       }
     }
     const task = await this.createQueuedTask(userId, projectId, body, "NORMAL", null);
@@ -102,7 +102,7 @@ export class Scheduler {
     await requireMember(this.prisma, projectId, userId, { write: true });
     const parent = await this.prisma.task.findFirst({ where: { id: parentTaskId, projectId } });
     if (!parent) throw new HttpError(404, "Parent task not found");
-    if (ACTIVE.includes(parent.status) && parent.amendable) return this.attachInFlightRefinement(userId, parent.id, body);
+    if (ACTIVE.includes(parent.status) && parent.amendable) return this.attachToActiveTask(userId, parent.id, body, "IN_FLIGHT_REFINEMENT");
     const task = await this.createQueuedTask(userId, projectId, body, "REFINEMENT", parent.id);
     void this.schedule(projectId);
     return task;
@@ -380,18 +380,19 @@ export class Scheduler {
     return serializeTask(task);
   }
 
-  private async attachInFlightRefinement(userId: string, taskId: string, body: string) {
+  private async attachToActiveTask(userId: string, taskId: string, body: string, role: "COMBINED_REQUEST" | "IN_FLIGHT_REFINEMENT") {
     const task = await this.prisma.task.findUniqueOrThrow({ where: { id: taskId }, include: { rootMessage: true, executor: true } });
     if (!ACTIVE.includes(task.status) || !task.amendable || !task.executorUserId) throw new HttpError(409, "Task is no longer amendable");
     const author = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
     const message = await this.prisma.message.create({ data: { projectId: task.projectId, authorId: userId, body, replyToMessageId: task.rootMessageId } });
-    await this.prisma.taskMessage.create({ data: { taskId, messageId: message.id, role: "IN_FLIGHT_REFINEMENT" } });
-    const delivered = this.connections.emitToMapped(task.executorUserId, task.projectId, "AMEND_TASK", { taskId, projectId: task.projectId, messageId: message.id, body, authorName: author.name });
+    await this.prisma.taskMessage.create({ data: { taskId, messageId: message.id, role } });
+    const delivered = this.connections.emitToMapped(task.executorUserId, task.projectId, "AMEND_TASK", { taskId, projectId: task.projectId, messageId: message.id, body, authorName: author.name, kind: role });
     if (!delivered) throw new HttpError(409, "Executor daemon disconnected before the amendment could be delivered");
-    await recordActivity(this.prisma, this.io, { projectId: task.projectId, taskId, userId, category: "REFINE", message: `refinement merged into #${task.number}` });
+    const combined = role === "COMBINED_REQUEST";
+    await recordActivity(this.prisma, this.io, { projectId: task.projectId, taskId, userId, category: combined ? "REQUEST" : "REFINE", message: combined ? `request combined into #${task.number}` : `refinement merged into #${task.number}` });
     this.io.to(`project:${task.projectId}:web`).emit("MESSAGE_CREATED", { projectId: task.projectId, messageId: message.id });
     this.taskUpdated(task.projectId, taskId);
-    return { kind: "IN_FLIGHT_REFINEMENT", taskId, messageId: message.id };
+    return { kind: combined ? "COMBINED_REQUEST" as const : "IN_FLIGHT_REFINEMENT" as const, taskId, messageId: message.id };
   }
 
   private async startNext(projectId: string) {

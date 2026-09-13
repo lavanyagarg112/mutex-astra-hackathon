@@ -42,6 +42,7 @@ enum TaskStatus {
 
 enum TaskMessageRole {
   INITIAL
+  COMBINED_REQUEST
   IN_FLIGHT_REFINEMENT
 }
 

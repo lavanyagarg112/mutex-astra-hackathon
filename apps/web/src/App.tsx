@@ -66,7 +66,7 @@ type Member = User & { online: boolean; present: boolean; daemonVersion?: string
 type ProjectItem = Project & { members: Member[]; onlineCount: number };
 type ProcessInfo = { name: string; status: "running" | "stopped" | "starting" | "failed"; port?: number; url?: string };
 type ProjectData = { project: ProjectItem; tasks: Task[]; messages: Message[]; activity: Activity[]; processes: ProcessInfo[] };
-type InFlightRefinementResult = { kind: "IN_FLIGHT_REFINEMENT"; taskId: string; messageId: string };
+type AttachedRequestResult = { kind: "COMBINED_REQUEST" | "IN_FLIGHT_REFINEMENT"; taskId: string; messageId: string };
 type ModalName = "project" | "createProject" | "initialize" | "user" | "share" | "rollback" | "cancel" | null;
 type Toast = { id: number; message: string; tone?: "success" | "warning" };
 type GithubRepository = { id: number | string; fullName: string; name: string; owner: string; cloneUrl: string; defaultBranch: string; private?: boolean; canWrite?: boolean; permissions?: { push?: boolean } };
@@ -405,7 +405,7 @@ function Workspace() {
                   }) : <EmptyQueue />}
                 </div>
               </div>
-              <Composer ref={composerRef} project={data.project} user={currentUser} replyTask={composerReply} serverMode={serverMode} socket={socket} onCancelReply={() => setComposerReply(null)} onCreated={(task) => { setData((current) => current ? ({ ...current, tasks: current.tasks.some((item) => item.id === task.id) ? current.tasks.map((item) => item.id === task.id ? task : item) : [...current.tasks, task] }) : current); toast(task.type === "REFINEMENT" ? "Refinement added at high priority." : "Request added to the execution queue."); }} onMerged={() => { toast("Refinement merged into the active request."); void loadProject(data.project.id); }} onMessageCreated={(message) => { setData((current) => current ? ({ ...current, messages: current.messages.some((item) => item.id === message.id) ? current.messages : [...current.messages, message] }) : current); }} />
+              <Composer ref={composerRef} project={data.project} user={currentUser} replyTask={composerReply} serverMode={serverMode} socket={socket} onCancelReply={() => setComposerReply(null)} onCreated={(task) => { setData((current) => current ? ({ ...current, tasks: current.tasks.some((item) => item.id === task.id) ? current.tasks.map((item) => item.id === task.id ? task : item) : [...current.tasks, task] }) : current); toast(task.type === "REFINEMENT" ? "Refinement added at high priority." : "Request added to the execution queue."); }} onAttached={(result) => { toast(result.kind === "COMBINED_REQUEST" ? "Request combined with the active task." : "Refinement merged into the active request."); void loadProject(data.project.id); }} onMessageCreated={(message) => { setData((current) => current ? ({ ...current, messages: current.messages.some((item) => item.id === message.id) ? current.messages : [...current.messages, message] }) : current); }} />
             </section>
 
             <aside className="relative hidden min-h-0 bg-[#fafaf9] xl:flex xl:flex-col">
@@ -593,7 +593,7 @@ function TaskCard({ task, queuePosition, onRefine, onPause, onResume, onCancel, 
       </div>
 
       {!!task.messages?.length && <div className="ml-[46px] mt-4 border-l border-zinc-200 pl-4">
-        {task.messages.map((reply) => <div key={reply.id} className="flex gap-2.5 py-1"><Avatar user={reply.author ?? bob} size="xs" /><div><div className="flex items-center gap-2 text-[10px]"><span className="font-semibold">{reply.author?.name ?? "Teammate"}</span><span className="text-zinc-400">In-flight refinement</span></div><p className="mt-1 text-[12px] leading-5 text-zinc-600">{reply.body}</p></div></div>)}
+        {task.messages.map((reply) => <div key={reply.id} className="flex gap-2.5 py-1"><Avatar user={reply.author ?? bob} size="xs" /><div><div className="flex items-center gap-2 text-[10px]"><span className="font-semibold">{reply.author?.name ?? "Teammate"}</span><span className="text-zinc-400">{reply.taskRole === "COMBINED_REQUEST" ? "Combined into this task" : "In-flight refinement"}</span></div><p className="mt-1 text-[12px] leading-5 text-zinc-600">{reply.body}</p></div></div>)}
       </div>}
 
       <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-3">
@@ -663,7 +663,7 @@ function DiffViewer({ diff }: { diff: StoredDiff }) {
 
 function EmptyQueue() { return <div className="rounded-2xl border border-dashed border-zinc-200 py-9 text-center"><CheckCircle2 className="mx-auto text-zinc-300" size={22} /><div className="mt-2 text-[12px] font-medium text-zinc-500">Start the conversation</div><p className="mt-1 text-[10px] text-zinc-400">Message your team or send the agent a coding request.</p></div>; }
 
-const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: User; replyTask: Task | null; serverMode: "connecting" | "live" | "demo"; socket: AppSocket | null; onCancelReply: () => void; onCreated: (task: Task) => void; onMerged: (result: InFlightRefinementResult) => void; onMessageCreated: (message: Message) => void }>(function Composer({ project, user, replyTask, serverMode, socket, onCancelReply, onCreated, onMerged, onMessageCreated }, ref) {
+const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: User; replyTask: Task | null; serverMode: "connecting" | "live" | "demo"; socket: AppSocket | null; onCancelReply: () => void; onCreated: (task: Task) => void; onAttached: (result: AttachedRequestResult) => void; onMessageCreated: (message: Message) => void }>(function Composer({ project, user, replyTask, serverMode, socket, onCancelReply, onCreated, onAttached, onMessageCreated }, ref) {
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
   const [explicit, setExplicit] = useState(true);
@@ -680,8 +680,8 @@ const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: U
         const created = await api<Message>(`/api/projects/${project.id}/messages`, { method: "POST", body: JSON.stringify({ body: text }) });
         onMessageCreated(created);
       } else {
-        const created = await api<Task | InFlightRefinementResult>(replyTask ? "/api/refinements" : "/api/requests", { method: "POST", body: JSON.stringify(replyTask ? { projectId: project.id, parentTaskId: replyTask.id, body: text, explicit } : { projectId: project.id, body: text }) });
-        if ("kind" in created) onMerged(created);
+        const created = await api<Task | AttachedRequestResult>(replyTask ? "/api/refinements" : "/api/requests", { method: "POST", body: JSON.stringify(replyTask ? { projectId: project.id, parentTaskId: replyTask.id, body: text, explicit } : { projectId: project.id, body: text }) });
+        if ("kind" in created) onAttached(created);
         else onCreated(created);
       }
       setBody(""); onCancelReply();
