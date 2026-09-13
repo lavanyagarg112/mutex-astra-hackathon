@@ -92,7 +92,7 @@ The preview Play control runs the inferred install command to completion, retrie
 
 Required validation commands retry once immediately after a non-zero exit. Mutex advances only if the retry succeeds; if it also fails after agent work, the existing repair loop receives the failure output, updates the implementation, and validates again before any push.
 
-Upload the installers to a release host and set `COMPANION_DOWNLOAD_URL_MAC`, `COMPANION_DOWNLOAD_URL_WINDOWS`, and `COMPANION_DOWNLOAD_URL_LINUX` to their public URLs. Personal Settings detects the visitor’s operating system while keeping all three downloads available. The legacy CLI flow below remains useful for local development and CI.
+Upload the installers to one GitHub Release and set `COMPANION_RELEASE_URL` to that release page. The app shows one **Download Companion** button so users can choose the installer for their operating system on the release page. The legacy CLI flow below remains useful for local development and CI.
 
 ### Legacy CLI companion
 
@@ -174,7 +174,7 @@ Mutex is deployable as one Docker web service plus PostgreSQL; the production se
 
    Add `read:user repo` as the OAuth scope (`GITHUB_OAUTH_SCOPE`). `repo` is needed to list private repositories and verify write access.
 3. In Render, set the Blueprint's `PUBLIC_URL` and `WEB_ORIGIN` to `https://YOUR-MUTEX-DOMAIN`, then add the GitHub client ID, client secret, callback URL, and scope. Keep `ALLOW_DEMO_AUTH=false`.
-4. Run **Companion installers** in GitHub Actions, publish its macOS, Windows, and Linux artifacts, then set the three `COMPANION_DOWNLOAD_URL_*` values. People can now sign in, join only repositories their GitHub account can write to, and pair their local Companion without a terminal.
+4. Run **Companion installers** in GitHub Actions, publish its macOS, Windows, and Linux artifacts in one release, then set `COMPANION_RELEASE_URL` to that release page. People can now sign in, join only repositories their GitHub account can write to, and authorise their local Companion without a terminal.
 
 There is no universal “Sign in with ChatGPT” authentication flow used here. GitHub OAuth is the right identity source because it also provides the repository authorization check Mutex needs.
 

@@ -26,19 +26,11 @@ app.disable("x-powered-by");
 app.use(cors({ origin, credentials: true }));
 app.use(express.json({ limit: "2mb" }));
 app.get("/health", (_req, res) => res.json({ ok: true }));
-app.get("/api/companion/download", (req, res) => {
-  const platform = String(req.query.platform ?? "").toLowerCase();
-  const downloads: Record<string, string | undefined> = {
-    darwin: process.env.COMPANION_DOWNLOAD_URL_MAC,
-    mac: process.env.COMPANION_DOWNLOAD_URL_MAC,
-    macos: process.env.COMPANION_DOWNLOAD_URL_MAC,
-    win32: process.env.COMPANION_DOWNLOAD_URL_WINDOWS,
-    windows: process.env.COMPANION_DOWNLOAD_URL_WINDOWS,
-    linux: process.env.COMPANION_DOWNLOAD_URL_LINUX,
-  };
-  if (!(platform in downloads)) return res.status(400).json({ error: "Choose macOS, Windows, or Linux." });
-  const url = downloads[platform];
-  if (!url) return res.status(503).json({ error: `The ${platform === "win32" || platform === "windows" ? "Windows" : platform === "linux" ? "Linux" : "macOS"} companion download has not been published yet.` });
+app.get("/api/companion/download", (_req, res) => {
+  // COMPANION_DOWNLOAD_URL_MAC is retained as a compatibility fallback for
+  // existing deployments that already point it at the GitHub Releases page.
+  const url = process.env.COMPANION_RELEASE_URL ?? process.env.COMPANION_DOWNLOAD_URL_MAC;
+  if (!url) return res.status(503).json({ error: "The Companion release page has not been configured yet." });
   return res.redirect(url);
 });
 app.use("/api/auth", createAuthRouter(prisma));
