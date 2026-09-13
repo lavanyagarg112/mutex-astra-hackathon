@@ -21,6 +21,36 @@ const credentialDirectory = join(homedir(), ".relaycode");
 const credentialFile = join(credentialDirectory, "github-token.bin");
 const askPassFile = join(credentialDirectory, process.platform === "win32" ? "git-askpass.cmd" : "git-askpass.sh");
 
+/** Apps opened from Finder or a desktop launcher do not inherit the user's
+ * interactive shell PATH. Import it once so repository commands can find the
+ * same Node, npm, Python, Git, and package-manager installations as Terminal.
+ */
+async function importLoginShellPath(): Promise<void> {
+  if (process.platform === "win32") return;
+  const loginShell = process.env.SHELL || (process.platform === "darwin" ? "/bin/zsh" : "/bin/sh");
+  if (!existsSync(loginShell)) return;
+  const marker = "__RELAYCODE_LOGIN_PATH__";
+  const discovered = await new Promise<string | undefined>((accept) => {
+    const child = spawn(loginShell, ["-ilc", `printf '\n${marker}%s\n' "$PATH"`], {
+      env: process.env,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let output = "";
+    const timer = setTimeout(() => { child.kill("SIGTERM"); accept(undefined); }, 5_000);
+    timer.unref();
+    child.stdout?.on("data", (chunk) => { if (output.length < 100_000) output += String(chunk); });
+    child.once("error", () => { clearTimeout(timer); accept(undefined); });
+    child.once("close", () => {
+      clearTimeout(timer);
+      const lines = output.split(/\r?\n/).filter((line) => line.startsWith(marker));
+      accept(lines.at(-1)?.slice(marker.length).trim() || undefined);
+    });
+  });
+  if (!discovered) return;
+  const paths = [...discovered.split(":"), ...(process.env.PATH ?? "").split(":")].filter(Boolean);
+  process.env.PATH = [...new Set(paths)].join(":");
+}
+
 async function installGitCredential(token?: string) {
   await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
   if (token) {
@@ -246,6 +276,7 @@ else {
   app.on("second-instance", (_event, argv) => { window?.show(); window?.focus(); const link = argv.find((arg) => arg.startsWith("relaycode://")); if (link) void acceptPairingUrl(link); });
   app.on("open-url", (event, url) => { event.preventDefault(); void acceptPairingUrl(url); });
   void app.whenReady().then(async () => {
+    await importLoginShellPath();
     // macOS must know the concrete bundle before it can replace an older generic
     // Electron URL handler. Windows and Linux preserve source-launch arguments.
     await registerProtocolHandler();
