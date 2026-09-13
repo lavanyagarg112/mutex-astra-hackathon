@@ -177,8 +177,12 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
       const user = await prisma.user.findUniqueOrThrow({ where: { id: req.userId! }, select: { githubToken: true } });
       if (!user.githubToken) throw new HttpError(403, `Connect GitHub to prove that you have access to ${project.repositoryOwner}/${project.repositoryName}.`);
       const repository = await getGitHubRepository(githubTokenFor(user), project.repositoryOwner, project.repositoryName);
-      if (!repository.canWrite) throw new HttpError(403, `You cannot join this project because your GitHub account does not have write access to ${repository.fullName}. Ask a repository administrator to grant access, then try again.`);
-      const membership = await prisma.projectMember.create({ data: { projectId, userId: req.userId!, role: "MEMBER", repositoryWrite: true } });
+      if (!repository.canRead) throw new HttpError(403, `You cannot join this project because your GitHub account does not have read access to ${repository.fullName}. Ask a repository administrator to grant access, then try again.`);
+      // Read access is enough to collaborate and view a project. Mutating queue
+      // actions remain protected by requireMember(..., { write: true }).
+      const membership = await prisma.projectMember.create({
+        data: { projectId, userId: req.userId!, role: "MEMBER", repositoryWrite: repository.canWrite },
+      });
       io.to(`project:${project.id}:web`).emit("MEMBER_STATUS_CHANGED", { projectId: project.id, userId: req.userId!, online: scheduler.connections.isOnline(req.userId!) });
       return res.status(201).json({ project: serializeProject(project), membership: { role: membership.role, repositoryWrite: membership.repositoryWrite } });
     } catch (error) { return routeError(res, error); }

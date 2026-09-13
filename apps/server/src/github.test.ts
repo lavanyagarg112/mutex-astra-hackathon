@@ -22,8 +22,40 @@ describe("GitHub repository access", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 404 })));
     await expect(getGitHubRepository("token", "private-org", "private-repo")).rejects.toMatchObject({
       status: 403,
-      message: "Your GitHub account does not have access to this repository.",
+      message: expect.stringContaining("Confirm that this GitHub account can open the repository"),
     });
+  });
+
+  it("explains when the OAuth token is missing repository scope", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", {
+      status: 404,
+      headers: { "X-OAuth-Scopes": "read:user, user:email" },
+    })));
+    await expect(getGitHubRepository("token", "private-org", "private-repo")).rejects.toMatchObject({
+      status: 403,
+      message: expect.stringContaining("OAuth scope: repo"),
+    });
+  });
+
+  it("explains when organization SSO authorization is required", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", {
+      status: 403,
+      headers: { "X-GitHub-SSO": "required; url=https://github.com/orgs/example/sso" },
+    })));
+    await expect(getGitHubRepository("token", "private-org", "private-repo")).rejects.toMatchObject({
+      status: 403,
+      message: expect.stringContaining("requires SSO authorization"),
+    });
+  });
+
+  it("keeps read and write repository permissions separate", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 42, full_name: "relay/code", name: "code", private: true,
+      html_url: "https://github.com/relay/code", clone_url: "https://github.com/relay/code.git",
+      default_branch: "main", owner: { login: "relay" }, permissions: { pull: true, push: false },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await expect(getGitHubRepository("token", "relay", "code")).resolves.toMatchObject({ canRead: true, canWrite: false });
   });
 
   it("reads manifests from the selected branch before inferring commands", async () => {

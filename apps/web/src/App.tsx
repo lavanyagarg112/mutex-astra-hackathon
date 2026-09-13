@@ -55,7 +55,7 @@ import {
 import { forwardRef, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { Activity, Project, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
 import { activeStatuses } from "@relaycode/shared";
-import { API_URL, api, beginGithubLogin, connectSocket, getActiveUserId, loginWithUsername, setActiveUserId } from "./lib/api";
+import { API_URL, ApiError, api, beginGithubLogin, connectSocket, getActiveUserId, loginWithUsername, setActiveUserId } from "./lib/api";
 import type { Socket } from "socket.io-client";
 import type { ClientToServerEvents, ServerToClientEvents } from "@relaycode/shared";
 
@@ -73,6 +73,7 @@ type InferredCommands = Pick<Project, "installCommand" | "frontendCommand" | "ba
   diagnostics?: string[];
 };
 type PairingState = { status: "pairing" | "ready" | "error"; code?: string; message?: string };
+type JoinState = { status: "joining" | "error" | "read-only"; message?: string };
 type RepositoryFrontend = "REACT" | "NEXT_JS" | "VUE" | "SVELTE" | "NONE";
 type RepositoryBackend = "EXPRESS" | "FASTIFY" | "NEST_JS" | "FASTAPI" | "DJANGO" | "NONE";
 type RepositoryDatabase = "POSTGRESQL" | "MYSQL" | "SQLITE" | "MONGODB" | "NONE";
@@ -179,7 +180,8 @@ function Workspace() {
   const [rightPanel, setRightPanel] = useState<"preview" | "activity">("preview");
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [currentUser, setCurrentUser] = useState<User>(() => getActiveUserId() === "bob" ? bob : getActiveUserId() === "charlie" ? charlie : alice);
-  const [joinState, setJoinState] = useState<{ status: "joining" | "error"; message?: string } | null>(null);
+  const [joinState, setJoinState] = useState<JoinState | null>(null);
+  const [joinAttempt, setJoinAttempt] = useState(0);
   const [pairingState, setPairingState] = useState<PairingState | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
@@ -199,8 +201,8 @@ function Workspace() {
         setServerMode("live");
       }
     } catch (reason) {
-      if (reason && typeof reason === "object" && "status" in reason && reason.status === 403) {
-        setJoinState({ status: "error", message: "Your GitHub account does not have access to this project’s repository. Ask the owner to grant repository access, then try again." });
+      if (reason instanceof ApiError && reason.status === 403) {
+        setJoinState({ status: "error", message: reason.message });
         return;
       }
       setData(null);
@@ -244,23 +246,25 @@ function Workspace() {
     if (!match) return;
     const invitedProjectId = decodeURIComponent(match[1]!);
     setJoinState({ status: "joining" });
-    void api<{ project: Project }>(`/api/projects/${invitedProjectId}/join`, { method: "POST" })
-      .then(({ project }) => {
+    void api<{ project: Project; membership?: { role: string; repositoryWrite: boolean } }>(`/api/projects/${invitedProjectId}/join`, { method: "POST" })
+      .then(({ project, membership }) => {
         const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 });
         setProjects((items) => items.some((item) => item.id === project.id) ? items : [...items, normalized]);
         setProjectId(project.id);
-        setJoinState(null);
-        window.history.replaceState({}, "", "/");
-        toast(`Joined ${project.name}. Repository access verified.`);
+        if (membership?.repositoryWrite === false) {
+          setJoinState({ status: "read-only", message: `You joined ${project.name} with read-only repository access. You can follow the queue, but coding requests and Git operations require write access.` });
+        } else {
+          setJoinState(null);
+          window.history.replaceState({}, "", "/");
+          toast(`Joined ${project.name}. Repository access verified.`);
+        }
       })
       .catch((reason: unknown) => {
-        let messageText = reason instanceof Error ? reason.message : "You could not join this project.";
-        try { messageText = JSON.parse(messageText).error ?? messageText; } catch { /* plain server response */ }
-        setJoinState({ status: "error", message: messageText });
+        setJoinState({ status: "error", message: reason instanceof Error ? reason.message : "You could not join this project." });
       });
     // Invitation is handled once on initial load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [joinAttempt]);
 
   useEffect(() => {
     if (window.location.pathname !== "/companion/connect") return;
@@ -369,7 +373,7 @@ function Workspace() {
       {modal === "rollback" && selectedTask && <RollbackModal task={selectedTask} allTasks={data.tasks} socket={socket} serverMode={serverMode} onClose={() => setModal(null)} onConfirm={(discarded) => {
         setModal(null); toast(`Remote history reset. ${discarded.length} task${discarded.length === 1 ? "" : "s"} removed from ${data.project.branch}.`, "warning");
       }} />}
-      {joinState && <JoinProjectStatus state={joinState} onClose={() => { setJoinState(null); window.history.replaceState({}, "", "/"); }} />}
+      {joinState && <JoinProjectStatus state={joinState} onRetry={() => setJoinAttempt((attempt) => attempt + 1)} onClose={() => { setJoinState(null); window.history.replaceState({}, "", "/"); }} />}
       {pairingState && <CompanionConnectStatus state={pairingState} onClose={() => { setPairingState(null); window.history.replaceState({}, "", "/"); }} />}
     </div>
   );
@@ -709,7 +713,10 @@ function CreateProjectModal({ user, onClose, onCreated }: { user: User; onClose:
         setRepositories(normalized);
         if (normalized.length === 0) setManualEntry(true);
       })
-      .catch(() => setManualEntry(true))
+      .catch((reason: unknown) => {
+        setManualEntry(true);
+        setError(reason instanceof Error ? reason.message : "GitHub repositories could not be loaded. Reconnect GitHub and try again.");
+      })
       .finally(() => setLoadingRepositories(false));
   }, []);
   const chooseRepository = (value: string) => {
@@ -863,13 +870,17 @@ function ShareModal({ project, onClose, toast }: { project: ProjectItem; onClose
   </Modal>;
 }
 
-function JoinProjectStatus({ state, onClose }: { state: { status: "joining" | "error"; message?: string }; onClose: () => void }) {
-  return <Modal onClose={state.status === "error" ? onClose : () => undefined} width="max-w-md">
+function JoinProjectStatus({ state, onClose, onRetry }: { state: JoinState; onClose: () => void; onRetry: () => void }) {
+  const joining = state.status === "joining";
+  const readOnly = state.status === "read-only";
+  return <Modal onClose={joining ? () => undefined : onClose} width="max-w-md">
     <div className="p-7 text-center">
-      <div className={cx("mx-auto grid size-11 place-items-center rounded-xl", state.status === "joining" ? "bg-zinc-100 text-zinc-600" : "bg-red-50 text-red-600")}>{state.status === "joining" ? <LoaderCircle size={19} className="animate-spin" /> : <ShieldCheck size={19} />}</div>
-      <h3 className="mt-4 text-[16px] font-semibold tracking-tight">{state.status === "joining" ? "Verifying repository access" : "You can’t join this project"}</h3>
-      <p className="mx-auto mt-2 max-w-sm text-[11px] leading-5 text-zinc-500">{state.status === "joining" ? "Relaycode is checking that your GitHub account has access to this repository." : state.message ?? "Your GitHub account does not have access to the project repository. Ask the owner to grant access, then try the invite again."}</p>
-      {state.status === "error" && <div className="mt-5 flex justify-center gap-2"><button onClick={onClose} className="rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-600">Back to projects</button><button onClick={beginGithubLogin} className="flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white"><Github size={13} /> Use another GitHub account</button></div>}
+      <div className={cx("mx-auto grid size-11 place-items-center rounded-xl", joining ? "bg-zinc-100 text-zinc-600" : readOnly ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-600")}>{joining ? <LoaderCircle size={19} className="animate-spin" /> : readOnly ? <Eye size={19} /> : <AlertTriangle size={19} />}</div>
+      <h3 className="mt-4 text-[16px] font-semibold tracking-tight">{joining ? "Verifying repository access" : readOnly ? "Joined with read-only access" : "Couldn’t join this project"}</h3>
+      <p className="mx-auto mt-2 max-w-sm text-[11px] leading-5 text-zinc-500">{joining ? "Relaycode is checking that your GitHub account has access to this repository." : state.message ?? "Relaycode could not verify access to the project repository."}</p>
+      {state.status === "error" && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-left text-[10px] leading-4 text-amber-900"><strong>Already a collaborator?</strong> Reconnect GitHub so Relaycode receives the repository permission, then retry this invite. For an organization repository, you may also need to authorize the organization’s SSO.</div>}
+      {state.status === "error" && <div className="mt-5 flex flex-wrap justify-center gap-2"><button onClick={onClose} className="rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-600">Back to projects</button><button onClick={onRetry} className="rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-700"><RefreshCw size={12} className="mr-1.5 inline" />Try again</button><button onClick={beginGithubLogin} className="flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white"><Github size={13} /> Reconnect GitHub</button></div>}
+      {readOnly && <div className="mt-5 flex justify-center gap-2"><button onClick={beginGithubLogin} className="flex items-center gap-2 rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-700"><Github size={13} /> Reconnect GitHub</button><button onClick={onClose} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Continue read-only</button></div>}
     </div>
   </Modal>;
 }

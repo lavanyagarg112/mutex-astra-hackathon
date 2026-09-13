@@ -4,6 +4,45 @@ import type { ClientToServerEvents, ServerToClientEvents } from "@relaycode/shar
 export const API_URL = import.meta.env.VITE_API_URL ?? "";
 const storageKey = "relaycode.userId";
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly details?: unknown;
+
+  constructor(status: number, message: string, details?: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.details = details;
+  }
+}
+
+function defaultErrorMessage(status: number): string {
+  if (status === 401) return "Your session has expired. Sign in again to continue.";
+  if (status === 403) return "You do not have permission to perform this action.";
+  if (status === 404) return "The requested item could not be found.";
+  if (status >= 500) return "Relaycode could not complete the request. Please try again.";
+  return `Request failed (${status}).`;
+}
+
+async function readError(response: Response): Promise<ApiError> {
+  const raw = await response.text().catch(() => "");
+  let message = "";
+  let details: unknown;
+
+  if (raw) {
+    try {
+      const body = JSON.parse(raw) as { error?: unknown; message?: unknown; details?: unknown };
+      message = typeof body.error === "string" ? body.error : typeof body.message === "string" ? body.message : "";
+      details = body.details;
+    } catch {
+      // Avoid displaying an HTML proxy response or an unhelpful serialized object.
+      if (!raw.trimStart().startsWith("<") && raw.length <= 500) message = raw.trim();
+    }
+  }
+
+  return new ApiError(response.status, message || defaultErrorMessage(response.status), details);
+}
+
 export function getActiveUserId(): string {
   return window.localStorage.getItem(storageKey) ?? import.meta.env.VITE_DEMO_USER_ID ?? "";
 }
@@ -24,10 +63,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    const message = await response.text().catch(() => response.statusText);
-    const error = new Error(message || `Request failed (${response.status})`) as Error & { status: number };
-    error.status = response.status;
-    throw error;
+    throw await readError(response);
   }
   return response.json() as Promise<T>;
 }

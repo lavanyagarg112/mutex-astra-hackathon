@@ -24,7 +24,7 @@ export function createAuthRouter(prisma: PrismaClient) {
       authorize.searchParams.set("client_id", clientId);
       authorize.searchParams.set("state", state);
       if (process.env.GITHUB_CALLBACK_URL) authorize.searchParams.set("redirect_uri", process.env.GITHUB_CALLBACK_URL);
-      if (process.env.GITHUB_OAUTH_SCOPE) authorize.searchParams.set("scope", process.env.GITHUB_OAUTH_SCOPE);
+      authorize.searchParams.set("scope", process.env.GITHUB_OAUTH_SCOPE?.trim() || "read:user repo");
       return res.redirect(authorize.toString());
     } catch (error) { return routeError(res, error); }
   });
