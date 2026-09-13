@@ -1,149 +1,131 @@
 # Mutex
 
-Mutex is a collaborative request queue for AI-assisted software development. The browser coordinates people, explicit queue order, task state, diffs, and activity. A small companion runs on each developer's computer and is the only component allowed to touch their repository, use their Git credential, or run the developer agent.
+Mutex is a collaborative request queue for AI-assisted software development. Teams submit changes in the browser, while a desktop Companion performs the actual agent, filesystem, process, and Git work on the requester's computer.
 
-This repository contains a working hackathon MVP—not only a prototype screen. It includes the web app, real-time server, PostgreSQL schema and seed data, deterministic scheduler, local companion, real Git synchronization/commit/push/rollback operations, and an OpenAI/command/demo agent abstraction.
+The configured remote Git branch is always canonical. Mutex allows one repository-writing task per project, keeps queue order as explicit application state, and records every important scheduler and Git transition.
 
-## What the demo proves
+## How it works
 
-- One mutating task per project; different projects can run concurrently.
-- Pending work is sorted by `queuePriority DESC, queueSequence ASC`, never by message time.
-- An offline requester is marked waiting and does not block other executable work.
-- Explicit or confidently classified refinements amend a still-amendable active task without restarting it.
-- Later refinements become priority tasks and move above normal work.
-- The requesting user's companion performs hard synchronization, agent work, validation, commit, and push with that user's local Git identity and credential.
-- A second fetch immediately before commit detects remote divergence, resets safely, and requeues the task.
-- Successful commits are accepted automatically, their centralized diffs appear in the UI, and all online companions synchronize.
-- Rollback is a confirmed, locked, force-with-lease history rewrite that retains discarded task records.
-- Pause, resume, cancel, member presence, project settings, user mappings, process status, and the activity terminal are wired end to end.
+1. A user signs in with GitHub and authorises the desktop Companion.
+2. They create a project from a repository they can write to.
+3. Each member clones or maps that project in their own Companion.
+4. A request runs on the requester's computer using their local Git identity and credential.
+5. The Companion synchronises to the remote branch, runs the agent, validates the result, creates one commit, and pushes it.
+6. Mutex accepts the commit automatically, stores its diff, and synchronises every online member.
 
-## Architecture
+Small, compatible requests can be combined into an amendable active task. Conflicting requests and low-confidence matches remain separate. User-to-user project chat is kept outside the developer agent's context.
+
+## Core guarantees
+
+- One active mutating task per project; separate projects may run concurrently.
+- Pending tasks use `queuePriority DESC, queueSequence ASC`, not message time.
+- An offline requester does not block other executable work.
+- Refinements have priority over normal queued requests.
+- Remote divergence never overwrites upstream work; the task is reset and requeued.
+- Git credentials remain on the member's computer.
+- Completed tasks are accepted automatically and retain a centrally stored diff.
+- Rollback is an explicit, confirmed `--force-with-lease` history rewrite.
+
+## Repository layout
 
 ```text
-apps/web       React + Vite + Tailwind operator workspace
-apps/server    Express + Socket.IO + Prisma scheduler/coordinator
-apps/daemon    Local Node CLI, Git/process access, agent providers
-packages/shared  Zod contracts and typed WebSocket payloads
+apps/
+  web/         React, Vite, and Tailwind interface
+  server/      Express, Socket.IO, Prisma, scheduler, and coordinator
+  companion/   Electron desktop Companion
+  daemon/      Headless/legacy Companion CLI
+packages/
+  shared/      Zod schemas, domain types, and WebSocket contracts
 ```
 
-The remote configured branch is canonical. The server never performs hidden Git changes and the language model never controls queue state. Task transitions are validated on the server; repository mutations are explicit commands in the assigned user's companion.
+## Run locally
 
-## Quick start
+### Requirements
 
-Requirements: Node.js 20+, npm, Git, and PostgreSQL 14+. Docker is optional. GitHub login is optional for a local demo and required for a deployed workspace.
+- Node.js 20 or newer
+- npm
+- Git
+- PostgreSQL 14 or newer
 
-1. Install dependencies and create local environment files.
-
-   ```bash
-   npm install
-   cp .env.example apps/server/.env
-   cp .env.example apps/web/.env
-   ```
-
-2. Start PostgreSQL, generate the Prisma client, apply the migration, and seed the two-person demo. On a Mac with Homebrew PostgreSQL:
-
-   ```bash
-   brew services start postgresql@14
-   createdb relaycode 2>/dev/null || true
-   npm run db:generate && npm run db:migrate && npm run db:seed
-   ```
-
-   If you do have Docker, the equivalent database startup is:
-
-   ```bash
-   docker compose up -d postgres
-   npm run db:generate && npm run db:migrate && npm run db:seed
-   ```
-
-3. Start the browser and coordination server.
-
-   ```bash
-   npm run dev
-   ```
-
-4. Open [http://localhost:5173](http://localhost:5173). For the local demo, use the seeded usernames `alice` or `bob`. For real repositories, add GitHub OAuth values below and choose **Continue with GitHub**.
-
-The server listens on `http://localhost:4100`. `GET /health` is the readiness check.
-
-## Connect the desktop companion
-
-For normal use, contributors do **not** clone this Mutex repository or configure a daemon in a terminal. Publish the companion once, then each contributor:
-
-1. Signs in to Mutex with GitHub.
-2. Opens **Personal settings**, downloads Mutex Companion for macOS, Windows, or Linux, and installs it.
-3. Returns to Mutex and chooses **Connect companion**. The browser opens the desktop app and passes a one-time pairing code.
-4. In the desktop app, chooses **Clone repository** or **Use existing folder** for each project.
-
-The Companion keeps its pairing token and GitHub credential only in that operating-system user account. It clones the project repository itself; it never asks the user to clone Mutex. Build each native distributable with:
+### 1. Install and configure
 
 ```bash
-npm run package:mac -w @relaycode/companion
-npm run package:windows -w @relaycode/companion
-npm run package:linux -w @relaycode/companion
+npm install
+cp .env.example apps/server/.env
+cp .env.example apps/web/.env
 ```
 
-The GitHub Actions workflow **Companion installers** builds all three operating-system packages. Run it manually or push a version tag, download its artifacts, and attach them to a GitHub Release. macOS produces a universal DMG/ZIP, Windows produces an NSIS installer/ZIP, and Linux produces AppImage/DEB packages.
-
-For local development, run `npm run dev -w @relaycode/companion`. On macOS this creates and launches an unpacked `Mutex Companion.app` with the real `relaycode://` registration; launching the generic Electron binary cannot receive website deep links correctly.
-
-When an owner creates a project, Mutex inspects the configured GitHub branch and pre-fills the install, frontend, backend, and validation commands from repository conventions. Owners can review or edit every value under **Project settings → Commands**, or use **Infer again** after the repository changes. With the shared OpenAI key configured, the project agent interprets manifests, README instructions, CI workflows, Makefiles, Docker Compose, environment examples, and workspace configuration, then selects only commands grounded in those files; unsafe or ungrounded suggestions are rejected. Detection supports common npm/pnpm/yarn/Bun monorepos, Python/FastAPI/Django/pytest projects, Go, and Rust, and gracefully falls back to deterministic detection.
-
-The preview Play control runs the inferred install command to completion, retries it once on failure, and starts the backend and frontend only after installation succeeds. The companion reports the actual local development URL to the signed-in user's browser, which embeds it in the preview panel and always provides an external **Open** link for sites that disallow iframes.
-
-Required validation commands retry once immediately after a non-zero exit. Mutex advances only if the retry succeeds; if it also fails after agent work, the existing repair loop receives the failure output, updates the implementation, and validates again before any push.
-
-Upload the installers to one GitHub Release and set `COMPANION_RELEASE_URL` to that release page. The app shows one **Download Companion** button so users can choose the installer for their operating system on the release page. The legacy CLI flow below remains useful for local development and CI.
-
-### Legacy CLI companion
-
-The companion stores its identity and project mappings locally in `~/.relaycode/config.json` with owner-only permissions. Git credentials use your existing local Git credential helper and are never sent to the server. First configure the companion identity:
+Edit `apps/server/.env` and add your GitHub OAuth credentials. Generate `SESSION_SECRET` and `TOKEN_ENCRYPTION_KEY` with:
 
 ```bash
-npm run cli -w @relaycode/daemon -- configure \
-  --server-url http://localhost:4100 \
-  --user-id alice \
-  --token alice-daemon-token
+openssl rand -base64 32
 ```
 
-Then configure a project mapping using the seeded project ID:
+Use these values for a local GitHub OAuth App:
+
+```text
+Homepage URL:               http://localhost:5173
+Authorization callback URL: http://localhost:4100/api/auth/github/callback
+```
+
+Then set:
+
+```dotenv
+GITHUB_CLIENT_ID=your-client-id
+GITHUB_CLIENT_SECRET=your-client-secret
+GITHUB_CALLBACK_URL=http://localhost:4100/api/auth/github/callback
+GITHUB_OAUTH_SCOPE="read:user repo"
+```
+
+### 2. Prepare PostgreSQL
+
+On macOS with Homebrew:
 
 ```bash
-npm run cli -w @relaycode/daemon -- configure project project-alpha \
-  --path /absolute/path/to/your/repository \
-  --remote https://github.com/your-org/your-repository.git
+brew services start postgresql@14
+createdb relaycode
+npm run db:generate && npm run db:migrate
 ```
 
-Then start Alice's companion:
+If `relaycode` already exists, skip `createdb relaycode`. Update `DATABASE_URL` in `apps/server/.env` if your PostgreSQL username, password, host, or database name differs.
+
+### 3. Start Mutex
 
 ```bash
-RELAYCODE_USER_ID=alice \
-RELAYCODE_DAEMON_TOKEN=alice-daemon-token \
-npm run dev -w @relaycode/daemon
+npm run dev
 ```
 
-In Mutex, open **Project settings → Agent**. A project owner enters the shared OpenAI key once and selects the developer model. The server stores the credential but never returns it to browsers or activity feeds; it is delivered only to the daemon assigned the current task. Git credentials remain local to each developer.
+Open [http://localhost:5173](http://localhost:5173). The API runs at `http://localhost:4100`; its health check is `GET /health`.
 
-Run Bob's companion in another terminal with `bob` and `bob-daemon-token`. Each user needs their own repository copy and local mapping. On first connection or reconnection, the companion synchronizes before it becomes eligible to execute tasks.
+### 4. Start the Companion during development
 
-### Agent providers
-
-The companion selects the first configured provider:
-
-1. A configured command provider runs your installed coding-agent command in the bound repository and sends the structured task on standard input.
-2. A shared OpenAI credential configured in Project settings uses the Responses API provider on the assigned local companion. Local `OPENAI_API_KEY` and `OPENAI_MODEL` values remain optional headless/CI fallbacks.
-3. Demo provider: makes a deterministic, visible repository change so the complete Git workflow can be demonstrated without an API account.
-
-For an external coding CLI, for example:
+In a second terminal:
 
 ```bash
-npm run cli -w @relaycode/daemon -- configure --agent-provider command --agent-command 'your-agent-command'
+npm run dev -w @relaycode/companion
 ```
 
-Never put an OpenAI or GitHub token in a request or project activity. Use the dedicated Project settings credential field; normal project responses expose only a configured/not-configured indicator, and activity metadata is sanitized.
+In the browser, open **Authorisation**, connect the Companion, then create a project. Open the project and choose **Clone repository** or **Use existing folder**. Contributors clone the selected project repository—not this Mutex source repository.
 
-## Git safety contract
+The Companion stores its pairing data and repository mappings locally. No database edits or manual pairing-code entry are required.
 
-Before each task the companion performs the equivalent of:
+## Project setup
+
+Project creation requires:
+
+- GitHub write access to the selected repository.
+- A previously authorised Companion.
+- A branch to use as the canonical source of truth.
+
+Mutex inspects the repository and proposes install, frontend, backend, and validation commands. Project owners can change them or run **Infer again** from **Project settings → Commands**. The preview starts the inferred local processes, reports their actual ports and URLs, and releases ports when those processes stop.
+
+Configure the shared OpenAI key once under **Project settings → Agent**. The server stores it centrally and exposes only whether it is configured. It is never written to activity logs or returned to browser clients.
+
+Validation is required before a normal task can push. Repository-initialisation tasks are allowed to create or repair the validation command first. When a command fails, the Companion retries it once; an agent task can then use the failure output to repair the implementation and validate again.
+
+## Git lifecycle
+
+Before editing, the Companion performs the equivalent of:
 
 ```text
 git fetch origin
@@ -151,68 +133,72 @@ git checkout <branch>
 git reset --hard origin/<branch>
 ```
 
-It intentionally does not run `git clean`; pre-existing untracked files such as `.env` remain untouched and are excluded from task commits. Immediately before commit it fetches again and compares `origin/<branch>` with the recorded base SHA. A mismatch produces `REMOTE_DIVERGED`, discards tracked work, synchronizes to the new head, and requeues the request without overwriting the remote.
+Untracked files such as local `.env` files are preserved. Before committing, Mutex fetches again and verifies that the remote branch still matches the recorded base commit. If it changed, tracked work is discarded, the Companion synchronises to the new head, and the request is requeued.
 
-Rollback targets the selected task's `baseCommitSha`. It acquires the project rollback lock, cancels active work, fetches, resets, and uses:
-
-```text
-git push --force-with-lease=refs/heads/<branch>:<observed-head> origin <branch>
-```
-
-Protected branches may reject this operation; the application reports that failure and keeps its task records. For the rollback demo, use a branch whose protection rules permit history rewriting.
+Rollback targets the selected task's base commit, cancels active work, and pushes with `--force-with-lease`. Branch protection may reject this operation, so the rollback demo needs a branch that permits history rewriting. Discarded task records remain in PostgreSQL.
 
 ## Deploy to Render
 
-Mutex is deployable as one Docker web service plus PostgreSQL; the production server serves the built web app from the same origin. `render.yaml` provisions both.
+The included `render.yaml` creates one Docker web service and one PostgreSQL database. The production server serves the built browser app from the same origin.
 
-1. Push this repository to a GitHub repository you control and create a Render Blueprint from it.
-2. In GitHub, create an OAuth App. Its authorization callback must be exactly:
+1. Push this repository to GitHub.
+2. In Render, choose **New → Blueprint** and select the repository.
+3. Fill the Blueprint environment values below and deploy.
+4. Update the GitHub OAuth App to use the deployed URL.
 
-   ```text
-   https://YOUR-MUTEX-DOMAIN/api/auth/github/callback
-   ```
+| Variable | Value |
+| --- | --- |
+| `PUBLIC_URL` | `https://YOUR-SERVICE.onrender.com` |
+| `WEB_ORIGIN` | `https://YOUR-SERVICE.onrender.com` |
+| `GITHUB_CLIENT_ID` | GitHub OAuth client ID |
+| `GITHUB_CLIENT_SECRET` | GitHub OAuth client secret |
+| `GITHUB_CALLBACK_URL` | `https://YOUR-SERVICE.onrender.com/api/auth/github/callback` |
+| `COMPANION_RELEASE_URL` | Public GitHub Release page containing the installers |
 
-   Add `read:user repo` as the OAuth scope (`GITHUB_OAUTH_SCOPE`). `repo` is needed to list private repositories and verify write access.
-3. In Render, set the Blueprint's `PUBLIC_URL` and `WEB_ORIGIN` to `https://YOUR-MUTEX-DOMAIN`, then add the GitHub client ID, client secret, callback URL, and scope. Keep `ALLOW_DEMO_AUTH=false`.
-4. Run **Companion installers** in GitHub Actions, publish its macOS, Windows, and Linux artifacts in one release, then set `COMPANION_RELEASE_URL` to that release page. People can now sign in, join only repositories their GitHub account can write to, and authorise their local Companion without a terminal.
+Render supplies `DATABASE_URL` and generates both server secrets. Keep `ALLOW_DEMO_AUTH=false` in production. Set the GitHub OAuth App homepage to the deployed root URL and its callback to the exact URL shown above.
 
-There is no universal “Sign in with ChatGPT” authentication flow used here. GitHub OAuth is the right identity source because it also provides the repository authorization check Mutex needs.
+## Publish the Companion
+
+The **Companion installers** GitHub Actions workflow builds macOS, Windows, and Linux packages. Run it manually or push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Download the workflow artifacts, attach them to one GitHub Release, and set `COMPANION_RELEASE_URL` to that release page. Mutex then displays one **Download Companion** button that works for every operating system.
+
+Local packaging commands are also available:
+
+```bash
+npm run package:mac -w @relaycode/companion
+npm run package:windows -w @relaycode/companion
+npm run package:linux -w @relaycode/companion
+```
+
+Unsigned development builds may trigger operating-system warnings. Public distribution should use the appropriate Apple and Windows code-signing certificates.
 
 ## Useful commands
 
 ```bash
-npm run dev                 # web + server
-npm run dev:all             # web + server + one companion
-npm run build               # all workspaces
+npm run dev                 # browser + server
+npm run build               # production build
 npm run typecheck           # TypeScript checks
-npm test                    # scheduler/Git/unit tests
-npm run package:mac -w @relaycode/companion # macOS desktop companion
-npm run package:windows -w @relaycode/companion # Windows desktop companion
-npm run package:linux -w @relaycode/companion # Linux desktop companion
-npm run db:generate         # Prisma client
-npm run db:migrate          # deploy checked-in SQL migration
-npm run db:seed             # reset/upsert demo records
-npm run cli -w @relaycode/daemon -- list
+npm test                    # unit and orchestration tests
+npm run db:generate         # generate Prisma Client
+npm run db:migrate          # apply checked-in migrations
+npm run db:seed             # create local demo users only
 ```
 
-## Demo script
+## Demo flow
 
-1. Sign in as Alice in one browser and Bob in another, with both companions online.
-2. Alice submits “Add a dark-mode toggle.” Her task synchronizes and starts locally.
-3. While the activity feed reports it as amendable, Bob explicitly replies “Put the toggle inside Settings.” The same task and executor remain active.
-4. After validation, one commit is pushed with Alice's local Git identity. The diff is persisted centrally, accepted automatically, and both companions synchronize.
-5. Queue a normal task, then refine the completed task as Bob: “Respect the user's system theme by default.” The new priority refinement visibly moves above the older normal request and runs on Bob's machine.
-6. Choose Rollback on the earlier task. The confirmation lists every task that will disappear and warns that active work will be cancelled. Confirm by entering `ROLLBACK`; Alice's companion performs the force-with-lease operation and the team synchronizes.
+1. Alice and Bob sign in, authorise their Companions, and map the same project.
+2. Alice requests a dark-mode toggle.
+3. While Alice's task is amendable, Bob replies that it should live in Settings; the refinement joins the active task.
+4. Alice's Companion validates and pushes one combined commit. Mutex displays the diff and synchronises both machines.
+5. Bob refines the completed task. The new refinement runs before older normal queued work and executes on Bob's computer.
+6. Alice rolls back an earlier task. Mutex lists the commits that will disappear, cancels active work, force-pushes with Alice's credential, and synchronises the team.
 
-## Security and MVP boundaries
+## MVP boundary
 
-- GitHub OAuth is used for production sign-in and repository-access validation. Username sign-in is available only when `ALLOW_DEMO_AUTH=true`, which the production blueprint disables.
-- Project membership and write permission are checked for every server action and WebSocket command.
-- Daemons authenticate separately, and tasks are dispatched only to the requesting user's socket.
-- Agent output and messages are rendered as text, not HTML. Sensitive settings are redacted from browser payloads and activity metadata.
-- The optional local preview uses localhost URLs only. If iframe policy blocks embedding, the UI provides an explicit Open Preview link; no tunneling service is included.
-- The in-process socket/lock registry is appropriate for one hackathon server instance. Production horizontal scaling requires a shared Socket.IO adapter and a PostgreSQL advisory/distributed lock.
-
-## Environment
-
-See [.env.example](./.env.example) and copy it into `apps/server/.env` and `apps/web/.env` as shown above. The core settings are `DATABASE_URL`, `PORT`, `WEB_ORIGIN`, `VITE_API_URL`, `DEMO_REPOSITORY_URL`, `DEMO_BRANCH`, `RELAYCODE_SERVER_URL`, `RELAYCODE_USER_ID`, and `RELAYCODE_DAEMON_TOKEN`. The shared OpenAI credential is normally configured once in Project settings; environment variables remain an optional headless fallback.
+The current lock and socket registry targets one application-server instance, which is appropriate for the hackathon deployment. Horizontal scaling requires a shared Socket.IO adapter and a distributed project lock. Local preview URLs are not tunneled; if a page cannot be embedded, Mutex provides an external **Open** link.
