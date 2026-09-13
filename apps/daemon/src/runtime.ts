@@ -18,7 +18,7 @@ import type {
 } from "@relaycode/shared";
 import { createAgentProvider, PauseGate, type AgentPhase, type AgentProvider } from "./agent.js";
 import type { DaemonConfig, ProjectBinding } from "./config.js";
-import { commitAndPush, discardTaskChanges, rollbackRemote, runGit, syncToRemote } from "./git.js";
+import { commitAndPush, discardTaskChanges, listUntracked, rollbackRemote, runGit, syncToRemote } from "./git.js";
 import { LocalProcessManager } from "./processes.js";
 import { agentChildEnvironment, sanitizeText } from "./sanitize.js";
 
@@ -180,6 +180,32 @@ export class DaemonRuntime {
       } else {
         if (project.toolPermissions?.tests === false) throw new Error("Validation is required before push, but test execution is disabled for this project.");
         if (!project.testCommand) throw new Error("Validation is required before push. Configure a test command in Project settings → Commands.");
+
+        // A newly cloned requester machine may not have project dependencies
+        // yet. Prepare the clean checkout before baseline validation so tools
+        // such as Vitest, pytest, and workspace package binaries are present.
+        // Reset any tracked installer side effects and treat generated local
+        // dependency files as baseline state so they cannot enter the commit.
+        if (project.installCommand) {
+          this.socket.emit("TASK_STATUS", {
+            projectId: project.id,
+            taskId: task.id,
+            phase: "SYNCING",
+            amendable: false,
+            shortStatus: "Preparing project dependencies",
+          });
+          this.activity(project.id, task.id, "SETUP", "running the configured install command before baseline validation");
+          try {
+            await this.runConfiguredCommand(execution, project.installCommand, "SYSTEM");
+          } catch (error) {
+            if (error instanceof ValidationCommandError) {
+              throw new Error(`Project dependency installation failed before baseline validation. Check Project settings → Commands, then retry. ${this.validationExcerpt(error)}`);
+            }
+            throw error;
+          }
+          await runGit(["reset", "--hard", `origin/${project.branch}`], binding.path, { signal: controller.signal });
+          execution.baselineUntracked = await listUntracked(binding.path);
+        }
 
         // A clean remote checkout must pass before the agent is allowed to edit.
         // Otherwise an environment or pre-existing repository problem could be
@@ -415,20 +441,20 @@ export class DaemonRuntime {
     return { name, email };
   }
 
-  private async runConfiguredCommand(execution: ActiveExecution, command: string, category: "TEST"): Promise<string> {
+  private async runConfiguredCommand(execution: ActiveExecution, command: string, category: "TEST" | "SYSTEM"): Promise<string> {
     try {
       return await this.runConfiguredCommandOnce(execution, command, category);
     } catch (error) {
       if (!(error instanceof ValidationCommandError) || execution.controller.signal.aborted) throw error;
       const projectId = execution.payload.project.id;
       const taskId = execution.payload.task.id;
-      this.activity(projectId, taskId, category, `Command failed with exit code ${error.exitCode ?? "unknown"}; retrying once before continuing`);
+      this.activity(projectId, taskId, category === "SYSTEM" ? "SETUP" : category, `Command failed with exit code ${error.exitCode ?? "unknown"}; retrying once before continuing`);
       this.output(projectId, taskId, category, "The latest command failed. Retrying it once before Relaycode continues to the next step.");
       return this.runConfiguredCommandOnce(execution, command, category);
     }
   }
 
-  private async runConfiguredCommandOnce(execution: ActiveExecution, command: string, category: "TEST"): Promise<string> {
+  private async runConfiguredCommandOnce(execution: ActiveExecution, command: string, category: "TEST" | "SYSTEM"): Promise<string> {
     await execution.pauseGate.wait(execution.controller.signal);
     const child = spawn(command, {
       cwd: execution.binding.path,
