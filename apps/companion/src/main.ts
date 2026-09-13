@@ -19,7 +19,7 @@ let knownProjects: ProjectSummary[] = [];
 const preloadFile = join(app.getAppPath(), "src", "preload.cjs");
 const credentialDirectory = join(homedir(), ".relaycode");
 const credentialFile = join(credentialDirectory, "github-token.bin");
-const askPassFile = join(credentialDirectory, "git-askpass.sh");
+const askPassFile = join(credentialDirectory, process.platform === "win32" ? "git-askpass.cmd" : "git-askpass.sh");
 
 async function installGitCredential(token?: string) {
   await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
@@ -30,8 +30,11 @@ async function installGitCredential(token?: string) {
   if (!existsSync(credentialFile) || !safeStorage.isEncryptionAvailable()) return;
   const encrypted = await readFile(credentialFile);
   process.env.RELAYCODE_GITHUB_TOKEN = safeStorage.decryptString(encrypted);
-  await writeFile(askPassFile, '#!/bin/sh\ncase "$1" in\n  *Username*) printf "%s\\n" "x-access-token" ;;\n  *Password*) printf "%s\\n" "$RELAYCODE_GITHUB_TOKEN" ;;\nesac\n', { mode: 0o700 });
-  await chmod(askPassFile, 0o700);
+  const askPass = process.platform === "win32"
+    ? '@echo off\necho %~1 | findstr /I "Username" >nul\nif %errorlevel%==0 (echo x-access-token) else (echo %RELAYCODE_GITHUB_TOKEN%)\n'
+    : '#!/bin/sh\ncase "$1" in\n  *Username*) printf "%s\\n" "x-access-token" ;;\n  *Password*) printf "%s\\n" "$RELAYCODE_GITHUB_TOKEN" ;;\nesac\n';
+  await writeFile(askPassFile, askPass, { mode: 0o700 });
+  if (process.platform !== "win32") await chmod(askPassFile, 0o700);
   process.env.GIT_ASKPASS = askPassFile;
 }
 

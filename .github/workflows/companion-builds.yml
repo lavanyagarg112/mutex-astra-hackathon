@@ -1,0 +1,40 @@
+name: Companion installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macOS
+            command: package:mac
+          - os: windows-latest
+            platform: Windows
+            command: package:windows
+          - os: ubuntu-latest
+            platform: Linux
+            command: package:linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build -w @relaycode/shared
+      - run: npm run ${{ matrix.command }} -w @relaycode/companion
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Relaycode-Companion-${{ matrix.platform }}
+          path: apps/companion/release/*
+          if-no-files-found: error

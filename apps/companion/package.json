@@ -9,7 +9,9 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "package:mac": "npm run build && electron-builder --mac dmg zip",
+    "package:mac": "npm run build && electron-builder --mac dmg zip --universal",
+    "package:windows": "npm run build && electron-builder --win nsis zip --x64",
+    "package:linux": "npm run build && electron-builder --linux AppImage deb --x64",
     "package": "npm run build && electron-builder"
   },
   "dependencies": {
@@ -39,6 +41,10 @@
       { "from": "src/renderer", "to": "renderer" }
     ],
     "files": ["dist/**/*", "src/preload.cjs", "src/renderer/**/*", "package.json", "../../packages/shared/package.json"],
-    "mac": { "category": "public.app-category.developer-tools", "target": ["dmg", "zip"] }
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "mac": { "category": "public.app-category.developer-tools", "target": ["dmg", "zip"] },
+    "win": { "target": ["nsis", "zip"] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
+    "linux": { "category": "Development", "target": ["AppImage", "deb"] }
   }
 }

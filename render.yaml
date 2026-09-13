@@ -33,6 +33,10 @@ services:
         value: read:user repo
       - key: COMPANION_DOWNLOAD_URL_MAC
         sync: false
+      - key: COMPANION_DOWNLOAD_URL_WINDOWS
+        sync: false
+      - key: COMPANION_DOWNLOAD_URL_LINUX
+        sync: false
 
 databases:
   - name: relaycode-db

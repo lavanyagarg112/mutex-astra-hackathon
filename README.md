@@ -70,15 +70,19 @@ The server listens on `http://localhost:4100`. `GET /health` is the readiness ch
 For normal use, contributors do **not** clone this Relaycode repository or configure a daemon in a terminal. Publish the companion once, then each contributor:
 
 1. Signs in to Relaycode with GitHub.
-2. Opens **Personal settings → Download for macOS** and installs Relaycode Companion.
+2. Opens **Personal settings**, downloads Relaycode Companion for macOS, Windows, or Linux, and installs it.
 3. Returns to Relaycode and chooses **Connect companion**. The browser opens the desktop app and passes a one-time pairing code.
 4. In the desktop app, chooses **Clone repository** or **Use existing folder** for each project.
 
-The Companion keeps its pairing token and GitHub credential only in that operating-system user account. It clones the project repository itself; it never asks the user to clone Relaycode. On macOS, build a distributable with:
+The Companion keeps its pairing token and GitHub credential only in that operating-system user account. It clones the project repository itself; it never asks the user to clone Relaycode. Build each native distributable with:
 
 ```bash
 npm run package:mac -w @relaycode/companion
+npm run package:windows -w @relaycode/companion
+npm run package:linux -w @relaycode/companion
 ```
+
+The GitHub Actions workflow **Companion installers** builds all three operating-system packages. Run it manually or push a version tag, download its artifacts, and attach them to a GitHub Release. macOS produces a universal DMG/ZIP, Windows produces an NSIS installer/ZIP, and Linux produces AppImage/DEB packages.
 
 For local development, run `npm run dev -w @relaycode/companion`. On macOS this creates and launches an unpacked `Relaycode Companion.app` with the real `relaycode://` registration; launching the generic Electron binary cannot receive website deep links correctly.
 
@@ -88,7 +92,7 @@ The preview Play control runs the inferred install command to completion, retrie
 
 Required validation commands retry once immediately after a non-zero exit. Relaycode advances only if the retry succeeds; if it also fails after agent work, the existing repair loop receives the failure output, updates the implementation, and validates again before any push.
 
-Upload the generated DMG/ZIP to a release host and set `COMPANION_DOWNLOAD_URL_MAC` to its public download URL. The legacy CLI flow below remains useful for local development and CI.
+Upload the installers to a release host and set `COMPANION_DOWNLOAD_URL_MAC`, `COMPANION_DOWNLOAD_URL_WINDOWS`, and `COMPANION_DOWNLOAD_URL_LINUX` to their public URLs. Personal Settings detects the visitor’s operating system while keeping all three downloads available. The legacy CLI flow below remains useful for local development and CI.
 
 ### Legacy CLI companion
 
@@ -170,7 +174,7 @@ Relaycode is deployable as one Docker web service plus PostgreSQL; the productio
 
    Add `read:user repo` as the OAuth scope (`GITHUB_OAUTH_SCOPE`). `repo` is needed to list private repositories and verify write access.
 3. In Render, set the Blueprint's `PUBLIC_URL` and `WEB_ORIGIN` to `https://YOUR-RELAYCODE-DOMAIN`, then add the GitHub client ID, client secret, callback URL, and scope. Keep `ALLOW_DEMO_AUTH=false`.
-4. Build and upload the macOS companion, then set `COMPANION_DOWNLOAD_URL_MAC`. People can now sign in, join only repositories their GitHub account can write to, and pair their local Companion without a terminal.
+4. Run **Companion installers** in GitHub Actions, publish its macOS, Windows, and Linux artifacts, then set the three `COMPANION_DOWNLOAD_URL_*` values. People can now sign in, join only repositories their GitHub account can write to, and pair their local Companion without a terminal.
 
 There is no universal “Sign in with ChatGPT” authentication flow used here. GitHub OAuth is the right identity source because it also provides the repository authorization check Relaycode needs.
 
@@ -183,6 +187,8 @@ npm run build               # all workspaces
 npm run typecheck           # TypeScript checks
 npm test                    # scheduler/Git/unit tests
 npm run package:mac -w @relaycode/companion # macOS desktop companion
+npm run package:windows -w @relaycode/companion # Windows desktop companion
+npm run package:linux -w @relaycode/companion # Linux desktop companion
 npm run db:generate         # Prisma client
 npm run db:migrate          # deploy checked-in SQL migration
 npm run db:seed             # reset/upsert demo records
