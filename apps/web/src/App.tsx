@@ -17,6 +17,7 @@ import {
   Ellipsis,
   Eye,
   FileCode2,
+  Folder,
   FolderGit2,
   GitBranch,
   GitCommitHorizontal,
@@ -50,7 +51,7 @@ import {
   Zap,
 } from "lucide-react";
 import { forwardRef, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import type { Activity, Message, PixelSkinId, Project, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
+import type { Activity, FileEntry, GitHistoryResponse, ListDirectoryResponse, Message, PixelSkinId, Project, ReadFileResponse, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
 import { activeStatuses } from "@relaycode/shared";
 import { API_URL, ApiError, api, beginGithubLogin, connectSocket, getActiveUserId, logout, setActiveUserId } from "./lib/api";
 import type { Socket } from "socket.io-client";
@@ -179,7 +180,7 @@ function Workspace() {
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [composerReply, setComposerReply] = useState<Task | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
-  const [rightPanel, setRightPanel] = useState<"preview" | "activity">("preview");
+  const [rightPanel, setRightPanel] = useState<"preview" | "activity" | "files" | "git">("preview");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem("relaycode.sidebarCollapsed") === "true");
   const [rightPanelWidth, setRightPanelWidth] = useState(() => {
     const stored = Number(window.localStorage.getItem("relaycode.rightPanelWidth"));
@@ -421,8 +422,13 @@ function Workspace() {
               <div className="flex border-b border-zinc-200 bg-white px-4 pt-3">
                 <PanelTab active={rightPanel === "preview"} icon={<MonitorPlay size={14} />} onClick={() => setRightPanel("preview")}>Local preview</PanelTab>
                 <PanelTab active={rightPanel === "activity"} icon={<TerminalSquare size={14} />} onClick={() => setRightPanel("activity")}>Activity</PanelTab>
+                <PanelTab active={rightPanel === "files"} icon={<FileCode2 size={14} />} onClick={() => setRightPanel("files")}>Files</PanelTab>
+                <PanelTab active={rightPanel === "git"} icon={<History size={14} />} onClick={() => setRightPanel("git")}>History</PanelTab>
               </div>
-              {rightPanel === "preview" ? <PreviewPanel key={data.project.id} project={data.project} processes={data.processes} mode={serverMode} /> : <ActivityPanel activity={data.activity} />}
+              {rightPanel === "preview" ? <PreviewPanel key={data.project.id} project={data.project} processes={data.processes} mode={serverMode} />
+                : rightPanel === "activity" ? <ActivityPanel activity={data.activity} />
+                : rightPanel === "files" ? <FilesPanel key={data.project.id} project={data.project} />
+                : <GitHistoryPanel key={data.project.id} project={data.project} />}
             </aside>
           </div>
         </main>
@@ -674,7 +680,7 @@ function HighlightedComposerText({ text }: { text: string }) {
   if (!match) return <>{text}</>;
   const rest = text.slice(match[0].length);
   const trailingSpace = match[0].slice("/agent".length);
-  return <><span className="rounded-full bg-blue-500/15 px-1.5 text-blue-600">/agent</span>{trailingSpace}{rest}</>;
+  return <><span className="rounded-sm text-blue-600" style={{ boxShadow: "0 0 0 3px rgba(59,130,246,0.15)", background: "rgba(59,130,246,0.15)" }}>/agent</span>{trailingSpace}{rest}</>;
 }
 
 const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: User; replyTask: Task | null; serverMode: "connecting" | "live" | "demo"; socket: AppSocket | null; onCancelReply: () => void; onCreated: (task: Task) => void; onAttached: (result: AttachedRequestResult) => void; onMessageCreated: (message: Message) => void }>(function Composer({ project, user, replyTask, serverMode, socket, onCancelReply, onCreated, onAttached, onMessageCreated }, ref) {
@@ -710,18 +716,21 @@ const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: U
     <div className="overflow-hidden rounded-[17px] border border-zinc-300 bg-white shadow-[0_16px_50px_rgba(24,24,27,.12)] transition focus-within:border-zinc-500 focus-within:ring-2 focus-within:ring-zinc-100">
       {replyTask && <div className="flex items-center gap-2 border-b border-zinc-100 bg-amber-50/70 px-3.5 py-2 text-[10px]"><MessageSquareReply size={12} className="text-amber-700" /><span className="font-medium text-amber-900">Refining Request #{replyTask.number}</span><span className="min-w-0 flex-1 truncate text-amber-700/70">{replyTask.rootMessage?.body}</span><label className="hidden items-center gap-1.5 text-[9px] text-amber-800 sm:flex"><input checked={explicit} onChange={(event) => setExplicit(event.target.checked)} type="checkbox" className="accent-zinc-900" /> Explicit reply</label><button type="button" onClick={onCancelReply} className="rounded p-1 text-amber-700 hover:bg-amber-100"><X size={12} /></button></div>}
       <div className="relative">
-        <div ref={backdropRef} aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-4 pb-2 pt-3 text-[12px] leading-5 text-zinc-900">
+        <div ref={backdropRef} aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-4 pb-2 pt-3 text-[13px] leading-5 text-zinc-900">
           <HighlightedComposerText text={body} />
         </div>
         <textarea
           ref={ref}
           value={body}
-          onChange={(event) => setBody(event.target.value)}
+          onChange={(event) => {
+            const value = event.target.value;
+            setBody(value.length > body.length && /^\/agent$/i.test(value) ? `${value} ` : value);
+          }}
           onScroll={(event) => { if (backdropRef.current) backdropRef.current.scrollTop = event.currentTarget.scrollTop; }}
           onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}
           rows={2}
           placeholder={replyTask ? "Describe the change to this request…" : "Message the team, or start with /agent to create a request…"}
-          className="relative block max-h-36 min-h-[66px] w-full resize-none bg-transparent px-4 pb-2 pt-3 text-[12px] leading-5 text-transparent caret-zinc-900 outline-none placeholder:text-zinc-400"
+          className="relative block max-h-36 min-h-[66px] w-full resize-none bg-transparent px-4 pb-2 pt-3 text-[13px] leading-5 text-transparent caret-zinc-900 outline-none placeholder:text-zinc-400"
         />
       </div>
       {error && <div className="mx-3 mb-2 rounded-lg bg-red-50 px-2.5 py-2 text-[10px] text-red-700">{error}</div>}
@@ -769,9 +778,142 @@ function PreviewPanel({ project, processes, mode }: { project: ProjectItem; proc
         {previewUrl ? <iframe title={`${project.name} local preview`} src={previewUrl} className="h-full w-full border-0 bg-white" sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts" /> : <div className="grid h-full place-items-center"><div className="text-center"><CirclePause size={23} className="mx-auto text-zinc-300" /><p className="mt-2 text-[10px] font-medium text-zinc-500">{starting ? "Waiting for the development server…" : "Preview stopped"}</p></div></div>}
       </div>
     </div>
-    <div className="mx-5 mt-4 space-y-2 pb-5">
-      <div className="text-[9px] font-semibold uppercase tracking-[.12em] text-zinc-400">Local processes</div>
-      {processes.map((process) => <div key={process.name} className="flex items-center gap-2 py-1.5 text-[10px]"><span className={cx("size-1.5 rounded-full", process.status === "running" ? "bg-emerald-500" : process.status === "starting" ? "bg-amber-400 pulse-soft" : process.status === "failed" ? "bg-red-500" : "bg-zinc-300")} /><span className="font-medium text-zinc-600">{process.name}</span><span className="ml-auto font-mono text-[9px] text-zinc-400">{process.port ? `:${process.port}` : process.status}</span></div>)}
+    {processes.length > 0 && <div className="mx-5 mb-4 mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-zinc-100 pt-3">
+      {processes.map((process) => <div key={process.name} className="flex items-center gap-1.5 text-[9px]"><span className={cx("size-1.5 shrink-0 rounded-full", process.status === "running" ? "bg-emerald-500" : process.status === "starting" ? "bg-amber-400 pulse-soft" : process.status === "failed" ? "bg-red-500" : "bg-zinc-300")} /><span className="font-medium text-zinc-500">{process.name}</span><span className="font-mono text-zinc-400">{process.port ? `:${process.port}` : process.status}</span></div>)}
+    </div>}
+  </div>;
+}
+
+type DirState = { entries: FileEntry[]; loading: boolean; error?: string };
+
+function FilesPanel({ project }: { project: ProjectItem }) {
+  const [dirs, setDirs] = useState<Record<string, DirState>>({});
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<string | null>(null);
+  const [file, setFile] = useState<{ content: string; truncated: boolean; binary: boolean } | "loading" | "error" | null>(null);
+
+  const loadDir = async (path: string) => {
+    setDirs((current) => ({ ...current, [path]: { entries: current[path]?.entries ?? [], loading: true } }));
+    try {
+      const result = await api<ListDirectoryResponse>(`/api/projects/${project.id}/files?path=${encodeURIComponent(path)}`);
+      setDirs((current) => ({ ...current, [path]: result.ok ? { entries: result.entries, loading: false } : { entries: [], loading: false, error: result.error } }));
+    } catch (error) {
+      setDirs((current) => ({ ...current, [path]: { entries: [], loading: false, error: error instanceof Error ? error.message : "Could not load this directory." } }));
+    }
+  };
+
+  useEffect(() => { setDirs({}); setExpanded(new Set()); setSelected(null); setFile(null); void loadDir(""); }, [project.id]);
+
+  const toggle = (path: string) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else { next.add(path); if (!dirs[path]) void loadDir(path); }
+      return next;
+    });
+  };
+
+  const openFile = async (path: string) => {
+    setSelected(path); setFile("loading");
+    try {
+      const result = await api<ReadFileResponse>(`/api/projects/${project.id}/files/content?path=${encodeURIComponent(path)}`);
+      setFile(result.ok ? { content: result.content, truncated: result.truncated, binary: result.binary } : "error");
+    } catch { setFile("error"); }
+  };
+
+  const root = dirs[""];
+  return <div className="flex min-h-0 flex-1">
+    <div className="fine-scrollbar w-[190px] shrink-0 overflow-y-auto border-r border-zinc-200 py-2">
+      {!root || (root.loading && !root.entries.length) ? <div className="px-3 py-2 text-[10px] text-zinc-400">Loading…</div>
+        : root.error ? <div className="px-3 py-2 text-[10px] text-red-500">{root.error}</div>
+        : root.entries.length ? root.entries.map((entry) => <FileTreeNode key={entry.path} entry={entry} depth={0} expanded={expanded} dirs={dirs} selected={selected} onToggle={toggle} onSelect={(path) => void openFile(path)} />)
+        : <div className="px-3 py-2 text-[10px] text-zinc-400">Empty repository</div>}
+    </div>
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {!selected ? <div className="grid h-full place-items-center px-6 text-center text-[10px] text-zinc-400">Select a file to view its contents</div>
+        : file === "loading" ? <div className="grid h-full place-items-center text-[10px] text-zinc-400">Loading…</div>
+        : file === "error" || !file ? <div className="grid h-full place-items-center px-6 text-center text-[10px] text-red-500">Could not load this file</div>
+        : file.binary ? <div className="grid h-full place-items-center px-6 text-center text-[10px] text-zinc-400">Binary file — preview not available</div>
+        : <CodeViewer path={selected} content={file.content} truncated={file.truncated} />}
+    </div>
+  </div>;
+}
+
+function FileTreeNode({ entry, depth, expanded, dirs, selected, onToggle, onSelect }: { entry: FileEntry; depth: number; expanded: Set<string>; dirs: Record<string, DirState>; selected: string | null; onToggle: (path: string) => void; onSelect: (path: string) => void }) {
+  const isDir = entry.type === "directory";
+  const isOpen = expanded.has(entry.path);
+  const state = dirs[entry.path];
+  return <div>
+    <button onClick={() => (isDir ? onToggle(entry.path) : onSelect(entry.path))} style={{ paddingLeft: 10 + depth * 12 }} className={cx("flex w-full items-center gap-1.5 py-1 pr-2 text-left text-[11px] hover:bg-zinc-100", !isDir && selected === entry.path && "bg-zinc-100 font-medium text-zinc-900")}>
+      {isDir ? (isOpen ? <ChevronDown size={11} className="shrink-0 text-zinc-400" /> : <ChevronRight size={11} className="shrink-0 text-zinc-400" />) : <span className="w-[11px] shrink-0" />}
+      {isDir ? <Folder size={12} className="shrink-0 text-zinc-400" /> : <FileCode2 size={12} className="shrink-0 text-zinc-400" />}
+      <span className="truncate text-zinc-700">{entry.name}</span>
+    </button>
+    {isDir && isOpen && (!state || (state.loading && !state.entries.length) ? <div style={{ paddingLeft: 22 + depth * 12 }} className="py-1 text-[10px] text-zinc-400">Loading…</div>
+      : state.error ? <div style={{ paddingLeft: 22 + depth * 12 }} className="py-1 text-[10px] text-red-500">{state.error}</div>
+      : state.entries.map((child) => <FileTreeNode key={child.path} entry={child} depth={depth + 1} expanded={expanded} dirs={dirs} selected={selected} onToggle={onToggle} onSelect={onSelect} />))}
+  </div>;
+}
+
+function CodeViewer({ path, content, truncated }: { path: string; content: string; truncated: boolean }) {
+  const lines = useMemo(() => content.split("\n"), [content]);
+  const gutterRef = useRef<HTMLDivElement>(null);
+  return <div className="flex h-full flex-col">
+    <div className="flex items-center gap-1.5 border-b border-zinc-100 px-3 py-2 text-[10px] font-medium text-zinc-500"><FileCode2 size={12} className="shrink-0 text-zinc-400" /><span className="truncate font-mono">{path}</span>{truncated && <span className="ml-auto shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[8px] font-medium text-amber-600">Truncated</span>}</div>
+    <div className="flex min-h-0 flex-1">
+      <div ref={gutterRef} className="select-none overflow-hidden border-r border-zinc-100 bg-zinc-50/60 px-2 py-2 text-right font-mono text-[10px] leading-5 text-zinc-300">
+        {lines.map((_, index) => <div key={index}>{index + 1}</div>)}
+      </div>
+      <textarea
+        readOnly
+        value={content}
+        spellCheck={false}
+        wrap="off"
+        onScroll={(event) => { if (gutterRef.current) gutterRef.current.scrollTop = event.currentTarget.scrollTop; }}
+        className="fine-scrollbar min-h-0 min-w-0 flex-1 resize-none overflow-auto whitespace-pre bg-transparent px-3 py-2 font-mono text-[10px] leading-5 text-zinc-700 outline-none"
+      />
+    </div>
+  </div>;
+}
+
+function GitHistoryPanel({ project }: { project: ProjectItem }) {
+  const [state, setState] = useState<"loading" | "error" | Extract<GitHistoryResponse, { ok: true }>>("loading");
+  const [errorMessage, setErrorMessage] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setState("loading");
+    api<GitHistoryResponse>(`/api/projects/${project.id}/git/history`).then((result) => {
+      if (cancelled) return;
+      if (result.ok) setState(result);
+      else { setState("error"); setErrorMessage(result.error); }
+    }).catch((error) => { if (!cancelled) { setState("error"); setErrorMessage(error instanceof Error ? error.message : "Could not load git history."); } });
+    return () => { cancelled = true; };
+  }, [project.id]);
+
+  if (state === "loading") return <div className="grid flex-1 place-items-center text-[10px] text-zinc-400">Loading history…</div>;
+  if (state === "error") return <div className="grid flex-1 place-items-center px-6 text-center text-[10px] text-red-500">{errorMessage}</div>;
+
+  return <div className="fine-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto">
+    <div className="flex flex-wrap gap-1.5 border-b border-zinc-100 px-4 py-3">
+      {state.branches.map((branch) => <span key={branch.name} className={cx("flex items-center gap-1 rounded-full px-2 py-1 text-[9px] font-medium", branch.current ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-600")}><GitBranch size={10} />{branch.name}</span>)}
+    </div>
+    <div className="flex-1 px-4 py-3">
+      {state.commits.map((commit, index) => <div key={commit.sha} className="relative flex gap-3">
+        <div className="flex flex-col items-center">
+          <span className="mt-1 size-2 shrink-0 rounded-full border-2 border-zinc-900 bg-white" />
+          {index < state.commits.length - 1 && <span className="w-px flex-1 bg-zinc-200" />}
+        </div>
+        <div className="min-w-0 flex-1 pb-4">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-[11px] font-medium text-zinc-800">{commit.message}</span>
+            {commit.refs.map((ref) => <span key={ref} className="shrink-0 rounded-full bg-blue-50 px-1.5 py-0.5 text-[8px] font-medium text-blue-600">{ref}</span>)}
+          </div>
+          <div className="mt-0.5 flex items-center gap-2 text-[9px] text-zinc-400">
+            <span className="font-mono">{commit.sha.slice(0, 7)}</span><span>{commit.author}</span><span>{new Date(commit.date).toLocaleString()}</span>
+          </div>
+        </div>
+      </div>)}
+      {!state.commits.length && <div className="py-6 text-center text-[10px] text-zinc-400">No commits found.</div>}
     </div>
   </div>;
 }
@@ -809,7 +951,7 @@ function Modal({ children, onClose, width = "max-w-xl" }: { children: ReactNode;
 }
 
 function ModalHeader({ icon, title, description, onClose }: { icon: ReactNode; title: string; description?: string; onClose: () => void }) {
-  return <div className="flex items-start gap-3 border-b border-zinc-100 px-5 py-5 sm:px-6"><div className="grid size-9 shrink-0 place-items-center rounded-xl bg-zinc-100 text-zinc-700">{icon}</div><div><h3 className="text-[15px] font-semibold tracking-tight">{title}</h3>{description && <p className="mt-1 text-[10px] leading-4 text-zinc-400">{description}</p>}</div><button onClick={onClose} className="ml-auto rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-100"><X size={17} /></button></div>;
+  return <div className={cx("flex gap-3 border-b border-zinc-100 px-5 py-5 sm:px-6", description ? "items-start" : "items-center")}><div className="grid size-9 shrink-0 place-items-center rounded-xl bg-zinc-100 text-zinc-700">{icon}</div><div><h3 className="text-[15px] font-semibold tracking-tight">{title}</h3>{description && <p className="mt-1 text-[10px] leading-4 text-zinc-400">{description}</p>}</div><button onClick={onClose} className="ml-auto rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-100"><X size={17} /></button></div>;
 }
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) { return <label className="block"><span className="text-[10px] font-semibold text-zinc-700">{label}</span>{hint && <span className="ml-2 text-[9px] text-zinc-400">{hint}</span>}<div className="mt-1.5">{children}</div></label>; }

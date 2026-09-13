@@ -1,8 +1,16 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { lstat, readdir, readFile as readFileBytes, realpath } from "node:fs/promises";
+import { relative, resolve as resolvePath, sep } from "node:path";
 import type { Socket } from "socket.io-client";
 import type {
   AmendTaskPayload,
   ClientToServerEvents,
+  FileEntry,
+  GitBranchInfo,
+  GitCommitInfo,
+  GitHistoryResponse,
+  ListDirectoryResponse,
+  ReadFileResponse,
   ServerToClientEvents,
   StartRollbackPayload,
   StartTaskPayload,
@@ -83,6 +91,9 @@ export class DaemonRuntime {
       this.activity(payload.projectId, undefined, "PROCESS", `Could not start preview: ${this.errorMessage(error)}`);
     }));
     this.socket.on("STOP_LOCAL_PREVIEW", ({ projectId }) => void this.processes.stopPreview(projectId));
+    this.socket.on("LIST_DIRECTORY", (payload, callback) => void this.listDirectory(payload).then(callback));
+    this.socket.on("READ_FILE", (payload, callback) => void this.readFile(payload).then(callback));
+    this.socket.on("GIT_HISTORY", (payload, callback) => void this.gitHistory(payload).then(callback));
   }
 
   async close(): Promise<void> {
@@ -464,4 +475,102 @@ export class DaemonRuntime {
   private errorMessage(error: unknown): string {
     return sanitizeText(error instanceof Error ? error.message : error).slice(0, 2_000);
   }
+
+  /** Resolves a repo-relative path and rejects anything that would escape the repository root. */
+  private async resolveRepoPath(binding: ProjectBinding, relativePathInput: string): Promise<string> {
+    const root = await realpath(binding.path);
+    const target = resolvePath(root, relativePathInput || ".");
+    const rel = relative(root, target);
+    if (rel.startsWith("..") || (rel !== "" && resolvePath(root, rel) !== target)) throw new Error("That path is outside the repository.");
+    return target;
+  }
+
+  private async listDirectory(payload: { projectId: string; path: string }): Promise<ListDirectoryResponse> {
+    const binding = this.config.projects[payload.projectId];
+    if (!binding) return { ok: false, error: "This project is not mapped to a local repository." };
+    try {
+      const target = await this.resolveRepoPath(binding, payload.path);
+      const info = await lstat(target);
+      if (!info.isDirectory()) return { ok: false, error: "That path is not a directory." };
+      const items = await readdir(target, { withFileTypes: true });
+      const entries: FileEntry[] = [];
+      for (const item of items) {
+        if (item.name === ".git") continue;
+        if (item.isSymbolicLink()) continue;
+        const absolute = resolvePath(target, item.name);
+        const relPath = relative(binding.path, absolute).split(sep).join("/");
+        if (item.isDirectory()) {
+          entries.push({ name: item.name, path: relPath, type: "directory" });
+        } else if (item.isFile()) {
+          const stat = await lstat(absolute).catch(() => undefined);
+          entries.push({ name: item.name, path: relPath, type: "file", size: stat?.size });
+        }
+      }
+      entries.sort((a, b) => (a.type !== b.type ? (a.type === "directory" ? -1 : 1) : a.name.localeCompare(b.name)));
+      return { ok: true, path: payload.path, entries };
+    } catch (error) {
+      return { ok: false, error: this.errorMessage(error) };
+    }
+  }
+
+  private async readFile(payload: { projectId: string; path: string }): Promise<ReadFileResponse> {
+    const binding = this.config.projects[payload.projectId];
+    if (!binding) return { ok: false, error: "This project is not mapped to a local repository." };
+    try {
+      const target = await this.resolveRepoPath(binding, payload.path);
+      const info = await lstat(target);
+      if (!info.isFile()) return { ok: false, error: "That path is not a file." };
+      const maxBytes = 1_000_000;
+      const buffer = await readFileBytes(target);
+      if (isLikelyBinary(buffer)) return { ok: true, path: payload.path, content: "", truncated: false, binary: true };
+      const truncated = buffer.length > maxBytes;
+      return { ok: true, path: payload.path, content: buffer.subarray(0, maxBytes).toString("utf8"), truncated, binary: false };
+    } catch (error) {
+      return { ok: false, error: this.errorMessage(error) };
+    }
+  }
+
+  private async gitHistory(payload: { projectId: string }): Promise<GitHistoryResponse> {
+    const binding = this.config.projects[payload.projectId];
+    if (!binding) return { ok: false, error: "This project is not mapped to a local repository." };
+    try {
+      const branchOutput = await runGit(["branch", "-a", "--format=%(refname:short)%09%(HEAD)"], binding.path, { raw: true });
+      const seen = new Set<string>();
+      const branches: GitBranchInfo[] = [];
+      for (const line of branchOutput.split("\n").map((entry) => entry.trim()).filter(Boolean)) {
+        const [name, head] = line.split("\t");
+        if (!name || name.includes("HEAD ->") || seen.has(name)) continue;
+        seen.add(name);
+        branches.push({ name, current: head === "*", remote: name.startsWith("origin/") });
+      }
+      const separator = "\x1f";
+      const terminator = "\x1e";
+      const logOutput = await runGit(
+        ["log", "--all", "--max-count=200", "--date=iso-strict", `--pretty=format:%H${separator}%an${separator}%ad${separator}%D${separator}%s${terminator}`],
+        binding.path,
+        { raw: true },
+      );
+      const commits: GitCommitInfo[] = logOutput.split(terminator).map((entry) => entry.replace(/^\n/, "")).filter(Boolean).map((entry) => {
+        const [sha, author, date, refs, message] = entry.split(separator);
+        return {
+          sha: sha ?? "",
+          author: author ?? "",
+          date: date ?? "",
+          message: message ?? "",
+          refs: refs ? refs.split(",").map((ref) => ref.trim()).filter(Boolean) : [],
+        };
+      });
+      return { ok: true, branches, commits };
+    } catch (error) {
+      return { ok: false, error: this.errorMessage(error) };
+    }
+  }
+}
+
+function isLikelyBinary(buffer: Buffer): boolean {
+  const sampleLength = Math.min(buffer.length, 8_000);
+  for (let index = 0; index < sampleLength; index += 1) {
+    if (buffer[index] === 0) return true;
+  }
+  return false;
 }
