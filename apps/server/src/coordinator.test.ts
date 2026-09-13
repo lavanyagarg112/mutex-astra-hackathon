@@ -4,6 +4,19 @@ import { OpenAICoordinator } from "./coordinator.js";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("OpenAICoordinator", () => {
+  it("combines equivalent requests without spending another model call", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new OpenAICoordinator().classify({
+      activeRequest: "Make the text bolder!",
+      incoming: "  make the TEXT bolder ",
+      apiKey: "test-key",
+      model: "gpt-5-mini",
+    })).resolves.toMatchObject({ kind: "COMBINE", confidence: 1 });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("returns a structured OpenAI refinement decision", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       output_text: JSON.stringify({ kind: "COMBINE", confidence: 0.94, reason: "It is a small addition to the active feature." }),

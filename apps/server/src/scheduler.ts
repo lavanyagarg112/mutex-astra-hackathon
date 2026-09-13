@@ -10,7 +10,7 @@ import { fullTaskInclude, serializeProject, serializeTask } from "./serialize.js
 
 const ACTIVE = activeStatuses as TaskStatus[];
 const MISSING_AGENT_KEY = "No OpenAI key is configured for this project. A project owner must add the shared key in Project settings → Agent before coding requests can run.";
-const COORDINATOR_MERGE_CONFIDENCE = 0.8;
+const COORDINATOR_MERGE_CONFIDENCE = 0.7;
 
 function usesSharedOpenAI(developerModel: string): boolean {
   return !["demo", "command"].includes(developerModel);
@@ -40,21 +40,23 @@ export class Scheduler {
 
   async createRequest(userId: string, projectId: string, body: string) {
     await requireMember(this.prisma, projectId, userId, { write: true });
-    const active = await this.prisma.task.findFirst({
-      where: { projectId, status: { in: ACTIVE } },
-      include: {
-        rootMessage: true,
-        taskMessages: {
-          where: { role: { in: ["COMBINED_REQUEST", "IN_FLIGHT_REFINEMENT"] } },
-          include: { message: true },
+    const [active, project] = await Promise.all([
+      this.prisma.task.findFirst({
+        where: { projectId, status: { in: ACTIVE } },
+        include: {
+          rootMessage: true,
+          taskMessages: {
+            where: { role: { in: ["COMBINED_REQUEST", "IN_FLIGHT_REFINEMENT"] } },
+            include: { message: true },
+          },
         },
-      },
-    });
-    if (active?.amendable) {
-      const project = await this.prisma.project.findUnique({
+      }),
+      this.prisma.project.findUnique({
         where: { id: projectId },
         select: { agentCredential: true, coordinatorModel: true },
-      });
+      }),
+    ]);
+    if (active?.amendable) {
       const decision = project?.agentCredential
         ? await this.coordinator.classify({
             incoming: body,
@@ -69,7 +71,40 @@ export class Scheduler {
         return this.attachToActiveTask(userId, active.id, body, "COMBINED_REQUEST");
       }
     }
+
+    // If it cannot join the running task, coalesce it with the earliest
+    // compatible queued request. Both messages then run as one task.
+    if (project?.agentCredential) {
+      const queued = await this.prisma.task.findMany({
+        where: { projectId, type: "NORMAL", executionMode: "NORMAL", status: { in: ["QUEUED", "WAITING_FOR_REQUESTER"] } },
+        orderBy: [{ queuePriority: "desc" }, { queueSequence: "asc" }],
+        take: 20,
+        include: {
+          rootMessage: true,
+          taskMessages: {
+            where: { role: { in: ["COMBINED_REQUEST", "IN_FLIGHT_REFINEMENT"] } },
+            include: { message: true },
+          },
+        },
+      });
+      for (const candidate of queued) {
+        const decision = await this.coordinator.classify({
+          incoming: body,
+          activeRequest: candidate.rootMessage.body,
+          activeStatus: "Queued; execution has not started",
+          existingRefinements: candidate.taskMessages.map((link) => link.message.body),
+          apiKey: project.agentCredential,
+          model: project.coordinatorModel,
+        });
+        if (decision.kind === "COMBINE" && decision.confidence >= COORDINATOR_MERGE_CONFIDENCE) {
+          return this.attachToQueuedTask(userId, candidate.id, body);
+        }
+      }
+    }
     const task = await this.createQueuedTask(userId, projectId, body, "NORMAL", null);
+    // The task may have become amendable between the active-task query and
+    // this insert. Reconsider queued work instead of leaving that race behind.
+    void this.exclusive(projectId, () => this.absorbCompatibleQueuedRequests(projectId));
     void this.schedule(projectId);
     return task;
   }
@@ -126,6 +161,7 @@ export class Scheduler {
     });
     await recordActivity(this.prisma, this.io, { projectId: task.projectId, taskId: task.id, userId, category: "AGENT", message: payload.shortStatus });
     this.taskUpdated(task.projectId, task.id);
+    if (payload.amendable) void this.exclusive(task.projectId, () => this.absorbCompatibleQueuedRequests(task.projectId, task.id));
     if (["FAILED", "CANCELLED"].includes(payload.phase)) void this.schedule(task.projectId);
   }
 
@@ -135,6 +171,7 @@ export class Scheduler {
     if (!["PLANNING", "EDITING"].includes(task.status) && payload.amendable) throw new HttpError(409, "This task phase cannot accept amendments");
     await this.prisma.task.update({ where: { id: task.id }, data: { amendable: payload.amendable } });
     this.taskUpdated(task.projectId, task.id);
+    if (payload.amendable) void this.exclusive(task.projectId, () => this.absorbCompatibleQueuedRequests(task.projectId, task.id));
   }
 
   async syncResult(socket: RelaySocket, payload: { projectId: string; taskId?: string; commitSha: string; ok: boolean; message?: string }) {
@@ -393,6 +430,107 @@ export class Scheduler {
     this.io.to(`project:${task.projectId}:web`).emit("MESSAGE_CREATED", { projectId: task.projectId, messageId: message.id });
     this.taskUpdated(task.projectId, taskId);
     return { kind: combined ? "COMBINED_REQUEST" as const : "IN_FLIGHT_REFINEMENT" as const, taskId, messageId: message.id };
+  }
+
+  private async attachToQueuedTask(userId: string, taskId: string, body: string) {
+    const task = await this.prisma.task.findUniqueOrThrow({ where: { id: taskId }, include: { rootMessage: true } });
+    if (!["QUEUED", "WAITING_FOR_REQUESTER"].includes(task.status) || task.type !== "NORMAL" || task.executionMode !== "NORMAL") {
+      throw new HttpError(409, "The matching request has already started; please submit again.");
+    }
+    const message = await this.prisma.message.create({
+      data: { projectId: task.projectId, authorId: userId, body, replyToMessageId: task.rootMessageId },
+    });
+    await this.prisma.taskMessage.create({ data: { taskId, messageId: message.id, role: "COMBINED_REQUEST" } });
+    await recordActivity(this.prisma, this.io, {
+      projectId: task.projectId,
+      taskId,
+      userId,
+      category: "REQUEST",
+      message: `request combined into queued #${task.number}`,
+    });
+    this.io.to(`project:${task.projectId}:web`).emit("MESSAGE_CREATED", { projectId: task.projectId, messageId: message.id });
+    this.taskUpdated(task.projectId, taskId);
+    return { kind: "COMBINED_REQUEST" as const, taskId, messageId: message.id };
+  }
+
+  /**
+   * Reconsider requests that arrived during the non-amendable synchronization
+   * window. Compatible requests become replies on the active task; conflicting
+   * or uncertain work keeps its original queue position.
+   */
+  private async absorbCompatibleQueuedRequests(projectId: string, expectedTaskId?: string) {
+    const [active, project] = await Promise.all([
+      this.prisma.task.findFirst({
+        where: { projectId, status: { in: ["PLANNING", "EDITING"] }, amendable: true, ...(expectedTaskId ? { id: expectedTaskId } : {}) },
+        include: {
+          rootMessage: true,
+          taskMessages: { where: { role: { in: ["COMBINED_REQUEST", "IN_FLIGHT_REFINEMENT"] } }, include: { message: true } },
+        },
+      }),
+      this.prisma.project.findUnique({ where: { id: projectId }, select: { agentCredential: true, coordinatorModel: true } }),
+    ]);
+    if (!active?.executorUserId || !project?.agentCredential) return;
+
+    const candidates = await this.prisma.task.findMany({
+      where: { projectId, type: "NORMAL", executionMode: "NORMAL", status: { in: ["QUEUED", "WAITING_FOR_REQUESTER"] } },
+      orderBy: [{ queuePriority: "desc" }, { queueSequence: "asc" }],
+      take: 20,
+      include: { rootMessage: { include: { author: true } } },
+    });
+    const attachedRequests = active.taskMessages.map((link) => link.message.body);
+    for (const candidate of candidates) {
+      const decision = await this.coordinator.classify({
+        incoming: candidate.rootMessage.body,
+        activeRequest: active.rootMessage.body,
+        activeStatus: active.shortStatus,
+        existingRefinements: attachedRequests,
+        apiKey: project.agentCredential,
+        model: project.coordinatorModel,
+      });
+      if (decision.kind !== "COMBINE" || decision.confidence < COORDINATOR_MERGE_CONFIDENCE) continue;
+      const merged = await this.mergeQueuedTaskIntoActive(active, candidate);
+      if (merged) attachedRequests.push(candidate.rootMessage.body);
+    }
+  }
+
+  private async mergeQueuedTaskIntoActive(
+    active: { id: string; number: number; projectId: string; executorUserId: string | null; rootMessageId: string },
+    queued: { id: string; number: number; rootMessageId: string; rootMessage: { body: string; authorId: string; author: { name: string } } },
+  ) {
+    if (!active.executorUserId) return false;
+    const merged = await this.prisma.$transaction(async (tx) => {
+      const currentActive = await tx.task.findFirst({ where: { id: active.id, projectId: active.projectId, status: { in: ["PLANNING", "EDITING"] }, amendable: true } });
+      if (!currentActive) return false;
+      const claimed = await tx.task.updateMany({
+        where: { id: queued.id, projectId: active.projectId, type: "NORMAL", executionMode: "NORMAL", status: { in: ["QUEUED", "WAITING_FOR_REQUESTER"] } },
+        data: { status: "CANCELLED", amendable: false, completedAt: new Date(), shortStatus: `Combined into Request #${active.number}` },
+      });
+      if (!claimed.count) return false;
+      await tx.taskMessage.deleteMany({ where: { taskId: queued.id, messageId: queued.rootMessageId } });
+      await tx.message.update({ where: { id: queued.rootMessageId }, data: { replyToMessageId: active.rootMessageId } });
+      await tx.taskMessage.create({ data: { taskId: active.id, messageId: queued.rootMessageId, role: "COMBINED_REQUEST" } });
+      return true;
+    });
+    if (!merged) return false;
+
+    this.connections.emitToMapped(active.executorUserId, active.projectId, "AMEND_TASK", {
+      taskId: active.id,
+      projectId: active.projectId,
+      messageId: queued.rootMessageId,
+      body: queued.rootMessage.body,
+      authorName: queued.rootMessage.author.name,
+      kind: "COMBINED_REQUEST",
+    });
+    await recordActivity(this.prisma, this.io, {
+      projectId: active.projectId,
+      taskId: active.id,
+      userId: queued.rootMessage.authorId,
+      category: "REQUEST",
+      message: `#${queued.number} combined into #${active.number}`,
+    });
+    this.taskUpdated(active.projectId, active.id);
+    this.taskUpdated(active.projectId, queued.id);
+    return true;
   }
 
   private async startNext(projectId: string) {
