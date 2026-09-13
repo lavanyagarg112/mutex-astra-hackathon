@@ -22,6 +22,10 @@ button { -webkit-tap-highlight-color: transparent; }
 .fine-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
 .fine-scrollbar::-webkit-scrollbar-thumb { background: #d5d5d1; border-radius: 999px; }
 
+@media (min-width: 1280px) {
+  .workspace-columns { grid-template-columns: minmax(520px, 1fr) var(--right-panel-width, 420px); }
+}
+
 .line-clamp-2 {
   display: -webkit-box;
   -webkit-box-orient: vertical;

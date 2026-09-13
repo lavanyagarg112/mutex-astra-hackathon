@@ -430,17 +430,26 @@ function requirePermission(project: Project, permission: "fileRead" | "fileWrite
 export function createAgentProvider(config: DaemonConfig, projectCredential?: string, projectModel?: string): AgentProvider {
   const key = projectCredential ?? process.env.OPENAI_API_KEY ?? config.agent.openaiApiKey;
   const selected = config.agent.provider;
+  if (projectModel === "demo") return new DemoAgentProvider();
+  if (projectModel === "command") {
+    if (!config.agent.command) throw new Error("Command developer agent selected, but no local agent command is configured in the Companion.");
+    return new CommandAgentProvider(config.agent.command);
+  }
   if (projectCredential) {
     const model = projectModel && !["local-agent", "openai", "demo", "command"].includes(projectModel) ? projectModel : config.agent.openaiModel;
     return new OpenAIAgentProvider(projectCredential, model);
+  }
+  if (selected === "demo") return new DemoAgentProvider();
+  if (selected === "command") {
+    if (!config.agent.command) throw new Error("Command developer agent selected, but no local agent command is configured in the Companion.");
+    return new CommandAgentProvider(config.agent.command);
   }
   if (selected === "openai" || (selected === "auto" && key)) {
     if (!key) throw new Error("OpenAI provider selected but OPENAI_API_KEY is not configured locally.");
     return new OpenAIAgentProvider(key, config.agent.openaiModel);
   }
-  if (selected === "command" || (selected === "auto" && config.agent.command)) {
-    if (!config.agent.command) throw new Error("Command provider selected but no agent command is configured.");
+  if (selected === "auto" && config.agent.command) {
     return new CommandAgentProvider(config.agent.command);
   }
-  return new DemoAgentProvider();
+  throw new Error("No OpenAI key is configured for this project. Ask a project owner to add the shared key in Project settings → Agent. Demo mode runs only when it is explicitly selected.");
 }

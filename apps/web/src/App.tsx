@@ -52,7 +52,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { forwardRef, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { forwardRef, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type { Activity, Message, PixelSkinId, Project, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
 import { activeStatuses } from "@relaycode/shared";
 import { API_URL, ApiError, api, beginGithubLogin, connectSocket, getActiveUserId, loginWithUsername, logout, setActiveUserId } from "./lib/api";
@@ -181,12 +181,54 @@ function Workspace() {
   const [composerReply, setComposerReply] = useState<Task | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const [rightPanel, setRightPanel] = useState<"preview" | "activity">("preview");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem("relaycode.sidebarCollapsed") === "true");
+  const [rightPanelWidth, setRightPanelWidth] = useState(() => {
+    const stored = Number(window.localStorage.getItem("relaycode.rightPanelWidth"));
+    return Number.isFinite(stored) && stored >= 320 ? stored : 420;
+  });
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [currentUser, setCurrentUser] = useState<User>(() => getActiveUserId() === "bob" ? bob : getActiveUserId() === "charlie" ? charlie : alice);
   const [joinState, setJoinState] = useState<JoinState | null>(null);
   const [joinAttempt, setJoinAttempt] = useState(0);
   const [pairingState, setPairingState] = useState<PairingState | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const selectedProjectRef = useRef(projectId);
+  selectedProjectRef.current = projectId;
+
+  const constrainRightPanelWidth = (width: number) => {
+    const available = window.innerWidth - (sidebarCollapsed ? 72 : 248) - 560;
+    return Math.max(320, Math.min(720, available, width));
+  };
+
+  useEffect(() => window.localStorage.setItem("relaycode.sidebarCollapsed", String(sidebarCollapsed)), [sidebarCollapsed]);
+  useEffect(() => window.localStorage.setItem("relaycode.rightPanelWidth", String(rightPanelWidth)), [rightPanelWidth]);
+  useEffect(() => {
+    const fit = () => setRightPanelWidth((width) => constrainRightPanelWidth(width));
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+    // Re-fit when the navigation rail changes the available workspace width.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarCollapsed]);
+
+  const resizeRightPanel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startingX = event.clientX;
+    const startingWidth = rightPanelWidth;
+    const move = (pointer: PointerEvent) => {
+      setRightPanelWidth(constrainRightPanelWidth(startingWidth + startingX - pointer.clientX));
+    };
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+  };
 
   const toast = (messageText: string, tone: Toast["tone"] = "success") => {
     const id = Date.now();
@@ -199,7 +241,7 @@ function Workspace() {
     try {
       const payload = await api<unknown>(`/api/projects/${nextId}`);
       const next = normalizeProjectPayload(payload);
-      if (next) {
+      if (next && selectedProjectRef.current === nextId) {
         setData(next);
         setServerMode("live");
       }
@@ -305,14 +347,15 @@ function Workspace() {
   }, [data?.messages, tasks]);
 
   const chooseProject = (id: string) => {
+    if (id !== projectId) setData(null);
     setProjectId(id);
     setMobileNav(false);
     setComposerReply(null);
   };
 
-  if (!data || !projectId) {
+  if (!projectId) {
     return <div className="flex min-h-screen bg-white text-ink">
-      <ProjectSidebar projects={projects} user={currentUser} selectedId="" open={mobileNav} onClose={() => setMobileNav(false)} onSelect={chooseProject} onCreateProject={() => setModal("createProject")} onUserSettings={() => setModal("user")} />
+      <ProjectSidebar projects={projects} user={currentUser} selectedId="" open={mobileNav} collapsed={sidebarCollapsed} onToggleCollapsed={() => setSidebarCollapsed((value) => !value)} onClose={() => setMobileNav(false)} onSelect={chooseProject} onCreateProject={() => setModal("createProject")} onUserSettings={() => setModal("user")} />
       <main className="grid min-w-0 flex-1 place-items-center px-6">
         <div className="max-w-md text-center">
           <div className="mx-auto grid size-12 place-items-center rounded-2xl bg-zinc-950 text-white"><FolderGit2 size={20} /></div>
@@ -326,16 +369,21 @@ function Workspace() {
     </div>;
   }
 
+  if (!data || data.project.id !== projectId) {
+    return <div className="grid min-h-screen place-items-center bg-white"><div className="flex items-center gap-2 text-[11px] text-zinc-500"><LoaderCircle size={15} className="animate-spin" /> Loading project…</div></div>;
+  }
+
   const emitControl = (kind: "pause" | "resume" | "cancel", task: Task) => {
     const event = kind === "pause" ? "PAUSE_ACTIVE_TASK" : kind === "resume" ? "RESUME_ACTIVE_TASK" : "CANCEL_ACTIVE_TASK";
     socket?.emit(event, { projectId: data.project.id, taskId: task.id });
-    toast(kind === "pause" ? "Task paused. The project lock is still held." : kind === "resume" ? "Task resumed on the same companion." : "Task cancelled and local tracked changes reset.", kind === "cancel" ? "warning" : "success");
+    const queued = ["QUEUED", "WAITING_FOR_REQUESTER", "REMOTE_DIVERGED"].includes(task.status);
+    toast(kind === "pause" ? "Task paused. The project lock is still held." : kind === "resume" ? "Task resumed on the same companion." : queued ? "Request removed from the execution queue." : "Task cancelled and local tracked changes reset.", kind === "cancel" ? "warning" : "success");
   };
 
   return (
     <div className="min-h-screen bg-white text-ink lg:h-screen lg:overflow-hidden">
       <div className="flex min-h-screen w-full overflow-hidden bg-white lg:h-screen lg:min-h-0">
-        <ProjectSidebar projects={projects} user={currentUser} companion={data.project.members.find((member) => member.id === currentUser.id)} selectedId={projectId} open={mobileNav} onClose={() => setMobileNav(false)} onSelect={chooseProject} onCreateProject={() => setModal("createProject")} onUserSettings={() => setModal("user")} />
+        <ProjectSidebar projects={projects} user={currentUser} companion={data.project.members.find((member) => member.id === currentUser.id)} selectedId={projectId} open={mobileNav} collapsed={sidebarCollapsed} onToggleCollapsed={() => setSidebarCollapsed((value) => !value)} onClose={() => setMobileNav(false)} onSelect={chooseProject} onCreateProject={() => setModal("createProject")} onUserSettings={() => setModal("user")} />
 
         <main className="flex min-w-0 flex-1 flex-col bg-white">
           <ProjectHeader
@@ -343,7 +391,7 @@ function Workspace() {
             onProjectSettings={() => setModal("project")} onShare={() => setModal("share")}
           />
 
-          <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[minmax(520px,1fr)_390px] 2xl:grid-cols-[minmax(620px,1fr)_450px]">
+          <div className="workspace-columns grid min-h-0 flex-1 grid-cols-1" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties}>
             <section className="relative flex min-h-[700px] min-w-0 flex-col border-r border-zinc-200/80 lg:min-h-0">
               <QueueHeader active={active} pendingCount={pending.length} />
               <div className="fine-scrollbar flex-1 overflow-y-auto px-4 pb-44 pt-2 sm:px-6 lg:px-8">
@@ -352,19 +400,20 @@ function Workspace() {
                     if (item.kind === "message") return <TeamMessage key={`message:${item.message.id}`} message={item.message} currentUser={currentUser} />;
                     const task = item.task;
                     const taskIsActive = active?.id === task.id;
-                    return <TaskCard key={`task:${task.id}`} task={task} queuePosition={queuePositions.get(task.id)} onRefine={(item) => { setComposerReply(item); composerRef.current?.focus(); }} onPause={() => taskIsActive && emitControl("pause", task)} onResume={() => taskIsActive && emitControl("resume", task)} onCancel={() => { if (taskIsActive) { setSelectedTask(task); setModal("cancel"); } }} onRollback={(item) => { setSelectedTask(item); setModal("rollback"); }} />;
+                    return <TaskCard key={`task:${task.id}`} task={task} queuePosition={queuePositions.get(task.id)} onRefine={(item) => { setComposerReply(item); composerRef.current?.focus(); }} onPause={() => taskIsActive && emitControl("pause", task)} onResume={() => taskIsActive && emitControl("resume", task)} onCancel={() => { setSelectedTask(task); setModal("cancel"); }} onRollback={(item) => { setSelectedTask(item); setModal("rollback"); }} />;
                   }) : <EmptyQueue />}
                 </div>
               </div>
               <Composer ref={composerRef} project={data.project} user={currentUser} replyTask={composerReply} serverMode={serverMode} socket={socket} onCancelReply={() => setComposerReply(null)} onCreated={(task) => { setData((current) => current ? ({ ...current, tasks: [...current.tasks, task] }) : current); toast(task.type === "REFINEMENT" ? "Refinement added at high priority." : "Request added to the execution queue."); }} onMessageCreated={(message) => { setData((current) => current ? ({ ...current, messages: current.messages.some((item) => item.id === message.id) ? current.messages : [...current.messages, message] }) : current); }} />
             </section>
 
-            <aside className="hidden min-h-0 bg-[#fafaf9] xl:flex xl:flex-col">
+            <aside className="relative hidden min-h-0 bg-[#fafaf9] xl:flex xl:flex-col">
+              <div role="separator" aria-label="Resize preview panel" aria-orientation="vertical" tabIndex={0} onPointerDown={resizeRightPanel} onKeyDown={(event) => { if (event.key === "ArrowLeft") setRightPanelWidth((width) => constrainRightPanelWidth(width + 24)); if (event.key === "ArrowRight") setRightPanelWidth((width) => constrainRightPanelWidth(width - 24)); }} className="group absolute inset-y-0 -left-1.5 z-20 flex w-3 cursor-col-resize touch-none items-center justify-center outline-none"><span className="h-10 w-0.5 rounded-full bg-zinc-300 opacity-0 transition group-hover:opacity-100 group-focus:opacity-100 group-active:bg-zinc-500 group-active:opacity-100" /></div>
               <div className="flex border-b border-zinc-200 bg-white px-4 pt-3">
                 <PanelTab active={rightPanel === "preview"} icon={<MonitorPlay size={14} />} onClick={() => setRightPanel("preview")}>Local preview</PanelTab>
                 <PanelTab active={rightPanel === "activity"} icon={<TerminalSquare size={14} />} onClick={() => setRightPanel("activity")}>Activity</PanelTab>
               </div>
-              {rightPanel === "preview" ? <PreviewPanel project={data.project} processes={data.processes} mode={serverMode} /> : <ActivityPanel activity={data.activity} />}
+              {rightPanel === "preview" ? <PreviewPanel key={data.project.id} project={data.project} processes={data.processes} mode={serverMode} /> : <ActivityPanel activity={data.activity} />}
             </aside>
           </div>
         </main>
@@ -378,7 +427,7 @@ function Workspace() {
 
       <PixelCrew members={data.project.members} activeTask={active} projectId={projectId} socket={socket} currentUserId={currentUser.id} />
 
-      {modal === "project" && <ProjectSettingsModal project={data.project} socket={socket} onClose={() => setModal(null)} onInitialize={() => setModal("initialize")} onSave={(project) => { setData((current) => current ? ({ ...current, project: { ...current.project, ...project } }) : current); setModal(null); toast("Project settings saved."); }} />}
+      {modal === "project" && <ProjectSettingsModal project={data.project} onClose={() => setModal(null)} onInitialize={() => setModal("initialize")} onSave={(project) => { setData((current) => current ? ({ ...current, project: { ...current.project, ...project } }) : current); setModal(null); toast("Project settings saved."); }} />}
       {modal === "createProject" && <CreateProjectModal user={currentUser} onClose={() => setModal(null)} onCreated={(project) => { const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 }); setProjects((current) => [...current, normalized]); setProjectId(project.id); setModal(null); toast("Project created. Open the companion to clone or connect the repository."); }} />}
       {modal === "initialize" && <InitializeRepositoryModal project={data.project} onClose={() => setModal(null)} onStarted={() => { setModal(null); toast("Repository initialization queued. It will run on your companion without requiring an existing validation command."); }} />}
       {modal === "user" && <UserSettingsModal projects={projects} user={currentUser} socket={socket} onClose={() => setModal(null)} onUpdated={setCurrentUser} />}
@@ -426,41 +475,42 @@ function LoginScreen({ onSignedIn }: { onSignedIn: () => void }) {
   </div>;
 }
 
-function ProjectSidebar({ projects, user, companion, selectedId, open, onClose, onSelect, onCreateProject, onUserSettings }: { projects: ProjectItem[]; user: User; companion?: Member; selectedId: string; open: boolean; onClose: () => void; onSelect: (id: string) => void; onCreateProject: () => void; onUserSettings: () => void }) {
+function ProjectSidebar({ projects, user, companion, selectedId, open, collapsed, onToggleCollapsed, onClose, onSelect, onCreateProject, onUserSettings }: { projects: ProjectItem[]; user: User; companion?: Member; selectedId: string; open: boolean; collapsed: boolean; onToggleCollapsed: () => void; onClose: () => void; onSelect: (id: string) => void; onCreateProject: () => void; onUserSettings: () => void }) {
   return <>
     {open && <button aria-label="Close project navigation" className="fixed inset-0 z-40 bg-black/20 backdrop-blur-[1px] lg:hidden" onClick={onClose} />}
-    <aside className={cx("fixed inset-y-0 left-0 z-50 flex w-[276px] flex-col border-r border-zinc-200 bg-[#f7f7f5] p-3 shadow-float transition-transform duration-300 lg:static lg:z-auto lg:w-[248px] lg:translate-x-0 lg:shadow-none 2xl:w-[270px]", open ? "translate-x-0" : "-translate-x-[110%]") }>
-      <div className="flex items-center justify-between px-2 py-2.5">
+    <aside className={cx("fixed inset-y-0 left-0 z-50 flex w-[276px] flex-col border-r border-zinc-200 bg-[#f7f7f5] p-3 shadow-float transition-[transform,width] duration-300 lg:static lg:z-auto lg:translate-x-0 lg:shadow-none", collapsed ? "lg:w-[72px]" : "lg:w-[248px] 2xl:w-[270px]", open ? "translate-x-0" : "-translate-x-[110%]") }>
+      <div className="relative flex items-center justify-between px-2 py-2.5">
         <div className="flex items-center gap-2.5">
           <div className="grid size-8 place-items-center rounded-[10px] bg-zinc-950 text-white"><Zap size={15} fill="currentColor" /></div>
-          <span className="text-[15px] font-semibold tracking-[-0.02em]">Relaycode</span>
+          <span className={cx("text-[15px] font-semibold tracking-[-0.02em]", collapsed && "lg:hidden")}>Relaycode</span>
         </div>
         <button aria-label="Close navigation" className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-200 lg:hidden" onClick={onClose}><X size={17} /></button>
+        <button aria-label={collapsed ? "Expand project navigation" : "Collapse project navigation"} title={collapsed ? "Expand sidebar" : "Collapse sidebar"} className={cx("hidden rounded-lg p-1.5 text-zinc-400 transition hover:bg-zinc-200 hover:text-zinc-700 lg:block", collapsed && "absolute left-[54px] border border-zinc-200 bg-white shadow-sm")} onClick={onToggleCollapsed}><ChevronRight size={14} className={cx("transition-transform", !collapsed && "rotate-180")} /></button>
       </div>
 
-      <button className="mt-3 flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-left text-[12px] text-zinc-500 shadow-sm transition hover:border-zinc-300"><Search size={14} /> Search requests <kbd className="ml-auto rounded border border-zinc-200 px-1.5 py-0.5 font-mono text-[9px]">⌘K</kbd></button>
+      <button title="Search requests" className={cx("mt-3 flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-left text-[12px] text-zinc-500 shadow-sm transition hover:border-zinc-300", collapsed && "lg:justify-center lg:px-0")}><Search size={14} /><span className={cx(collapsed && "lg:hidden")}>Search requests</span><kbd className={cx("ml-auto rounded border border-zinc-200 px-1.5 py-0.5 font-mono text-[9px]", collapsed && "lg:hidden")}>⌘K</kbd></button>
 
-      <div className="mt-7 flex items-center justify-between px-2">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-400">Projects</span>
+      <div className={cx("mt-7 flex items-center justify-between px-2", collapsed && "lg:justify-center lg:px-0")}>
+        <span className={cx("text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-400", collapsed && "lg:hidden")}>Projects</span>
         <button aria-label="Create project" onClick={onCreateProject} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700"><Plus size={14} /></button>
       </div>
       <nav className="mt-2 flex flex-col gap-1">
-        {projects.map((project) => <button key={project.id} onClick={() => onSelect(project.id)} className={cx("group flex items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition", selectedId === project.id ? "bg-white text-zinc-950 shadow-sm ring-1 ring-zinc-200" : "text-zinc-600 hover:bg-zinc-200/60")}>
+        {projects.map((project) => <button key={project.id} title={collapsed ? project.name : undefined} onClick={() => onSelect(project.id)} className={cx("group relative flex items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition", collapsed && "lg:justify-center lg:px-0", selectedId === project.id ? "bg-white text-zinc-950 shadow-sm ring-1 ring-zinc-200" : "text-zinc-600 hover:bg-zinc-200/60")}>
           <div className={cx("grid size-8 shrink-0 place-items-center rounded-lg border text-[11px] font-semibold", selectedId === project.id ? "border-zinc-800 bg-zinc-900 text-white" : "border-zinc-200 bg-white text-zinc-500")}>{project.name.split(" ").map((word) => word[0]).join("").slice(0, 2)}</div>
-          <div className="min-w-0 flex-1"><div className="truncate text-[12px] font-medium">{project.name}</div><div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-zinc-400"><GitBranch size={10} /> {project.branch}</div></div>
-          {project.onlineCount > 0 && <span className="flex items-center gap-1 text-[9px] text-zinc-400"><span className="size-1.5 rounded-full bg-emerald-500" />{project.onlineCount}</span>}
+          <div className={cx("min-w-0 flex-1", collapsed && "lg:hidden")}><div className="truncate text-[12px] font-medium">{project.name}</div><div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-zinc-400"><GitBranch size={10} /> {project.branch}</div></div>
+          {project.onlineCount > 0 && <span className={cx("flex items-center gap-1 text-[9px] text-zinc-400", collapsed && "lg:absolute lg:bottom-1.5 lg:right-1.5")}><span className="size-1.5 rounded-full bg-emerald-500" /><span className={cx(collapsed && "lg:hidden")}>{project.onlineCount}</span></span>}
         </button>)}
       </nav>
 
       <div className="mt-auto space-y-2 pt-6">
-        <div className="rounded-xl border border-zinc-200 bg-white p-3">
-          <div className="flex items-center gap-2 text-[11px] font-medium"><Laptop2 size={14} /> Local companion <span className={cx("ml-auto size-2 rounded-full", companion?.online ? "bg-emerald-500" : "bg-zinc-300")} /></div>
-          <div className="mt-1.5 text-[10px] text-zinc-400">{companion?.online ? `Online · v${companion.daemonVersion ?? "unknown"}${companion.synchronized ? " · synced" : ""}` : "Offline · start the local daemon"}</div>
+        <div title={collapsed ? `Local companion: ${companion?.online ? "online" : "offline"}` : undefined} className={cx("relative rounded-xl border border-zinc-200 bg-white p-3", collapsed && "lg:grid lg:h-10 lg:place-items-center lg:p-0")}>
+          <div className="flex items-center gap-2 text-[11px] font-medium"><Laptop2 size={14} /><span className={cx(collapsed && "lg:hidden")}>Local companion</span><span className={cx("ml-auto size-2 rounded-full", collapsed && "lg:absolute lg:right-1.5 lg:top-1.5 lg:ml-0", companion?.online ? "bg-emerald-500" : "bg-zinc-300")} /></div>
+          <div className={cx("mt-1.5 text-[10px] text-zinc-400", collapsed && "lg:hidden")}>{companion?.online ? `Online · v${companion.daemonVersion ?? "unknown"}${companion.synchronized ? " · synced" : ""}` : "Offline · start the local daemon"}</div>
         </div>
-        <button onClick={onUserSettings} className="flex w-full items-center gap-2.5 rounded-xl px-2 py-2 text-left hover:bg-zinc-200/60">
+        <button title={collapsed ? user.name : undefined} onClick={onUserSettings} className={cx("flex w-full items-center gap-2.5 rounded-xl px-2 py-2 text-left hover:bg-zinc-200/60", collapsed && "lg:justify-center lg:px-0")}>
           <Avatar user={user} size="sm" online />
-          <div className="min-w-0 flex-1"><div className="text-[12px] font-medium">{user.name}</div><div className="text-[10px] text-zinc-400">Personal settings</div></div>
-          <MoreHorizontal size={15} className="text-zinc-400" />
+          <div className={cx("min-w-0 flex-1", collapsed && "lg:hidden")}><div className="text-[12px] font-medium">{user.name}</div><div className="text-[10px] text-zinc-400">Personal settings</div></div>
+          <MoreHorizontal size={15} className={cx("text-zinc-400", collapsed && "lg:hidden")} />
         </button>
       </div>
     </aside>
@@ -515,6 +565,7 @@ function TaskCard({ task, queuePosition, onRefine, onPause, onResume, onCancel, 
   const meta = statusMeta[task.status];
   const isActive = activeStatuses.includes(task.status);
   const isCommitted = task.status === "COMMITTED";
+  const isPending = ["QUEUED", "WAITING_FOR_REQUESTER", "REMOTE_DIVERGED"].includes(task.status);
   const isDiscarded = task.status === "DISCARDED_BY_ROLLBACK" || task.status === "ROLLED_BACK";
   return <article id={`task-${task.number}`} className={cx("group relative rounded-[18px] border transition-all duration-300", isActive ? "active-sheen border-amber-300/80 bg-amber-50/25 shadow-[0_10px_30px_rgba(161,112,33,.08)]" : "border-transparent bg-transparent hover:bg-zinc-50/80", isDiscarded && "bg-zinc-50 opacity-70")}>
     {isActive && <div className="absolute left-5 right-5 top-0 h-[2px] bg-gradient-to-r from-transparent via-amber-500 to-transparent" />}
@@ -534,6 +585,7 @@ function TaskCard({ task, queuePosition, onRefine, onPause, onResume, onCancel, 
           <button aria-label="Task menu" onClick={() => setMenuOpen(!menuOpen)} className="rounded-lg p-1.5 text-zinc-400 opacity-70 hover:bg-zinc-100 hover:text-zinc-700 group-hover:opacity-100"><Ellipsis size={16} /></button>
           {menuOpen && <div className="absolute right-0 top-8 z-20 w-40 rounded-xl border border-zinc-200 bg-white p-1.5 text-[11px] shadow-float">
             <button onClick={() => { onRefine(task); setMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 hover:bg-zinc-50"><MessageSquareReply size={13} /> Refine request</button>
+            {isPending && <button onClick={() => { onCancel(); setMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-red-600 hover:bg-red-50"><Trash2 size={13} /> Delete request</button>}
             {isCommitted && <button onClick={() => { onRollback(task); setMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-red-600 hover:bg-red-50"><RotateCcw size={13} /> Roll back here</button>}
           </div>}
         </div>
@@ -552,6 +604,7 @@ function TaskCard({ task, queuePosition, onRefine, onPause, onResume, onCancel, 
           {isActive && task.status !== "PAUSED" && <button onClick={onPause} className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 py-1.5 text-[10px] font-medium hover:bg-zinc-50"><Pause size={11} /> Pause</button>}
           {task.status === "PAUSED" && <button onClick={onResume} className="flex items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-[10px] font-medium text-white"><Play size={11} /> Resume</button>}
           {isActive && <button onClick={onCancel} className="rounded-lg border border-zinc-200 p-1.5 text-zinc-500 hover:border-red-200 hover:bg-red-50 hover:text-red-600" aria-label="Cancel active task"><Square size={11} fill="currentColor" /></button>}
+          {isPending && <button onClick={onCancel} className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-medium text-zinc-400 hover:bg-red-50 hover:text-red-600"><Trash2 size={11} /> Delete</button>}
         </div>
       </div>
 
@@ -795,19 +848,29 @@ function CreateProjectModal({ user, onClose, onCreated }: { user: User; onClose:
   </Modal>;
 }
 
-function ProjectSettingsModal({ project, socket, onClose, onInitialize, onSave }: { project: ProjectItem; socket: AppSocket | null; onClose: () => void; onInitialize: () => void; onSave: (project: ProjectItem) => void }) {
-  const [draft, setDraft] = useState(project);
+function ProjectSettingsModal({ project, onClose, onInitialize, onSave }: { project: ProjectItem; onClose: () => void; onInitialize: () => void; onSave: (project: ProjectItem) => void }) {
+  const [draft, setDraft] = useState(() => ({ ...project, coordinatorModel: project.coordinatorModel.startsWith("gpt-") ? project.coordinatorModel : "gpt-5-mini" }));
   const [agentCredential, setAgentCredential] = useState("");
   const [clearAgentCredential, setClearAgentCredential] = useState(false);
   const [tab, setTab] = useState<"repository" | "agent" | "commands">("repository");
   const [detectingCommands, setDetectingCommands] = useState(false);
   const [commandDetectionMessage, setCommandDetectionMessage] = useState("");
   const [commandDetectionFailed, setCommandDetectionFailed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const [permissions, setPermissions] = useState<Record<string, boolean>>({ "File read": project.toolPermissions?.fileRead ?? true, "File write": project.toolPermissions?.fileWrite ?? true, Shell: project.toolPermissions?.shell ?? true, Git: project.toolPermissions?.git ?? true, Tests: project.toolPermissions?.tests ?? true, Network: project.toolPermissions?.network ?? false });
-  const save = () => {
+  const save = async () => {
+    if (saving) return;
     const toolPermissions = { fileRead: permissions["File read"] ?? false, fileWrite: permissions["File write"] ?? false, shell: permissions.Shell ?? false, git: permissions.Git ?? false, tests: permissions.Tests ?? false, network: permissions.Network ?? false };
-    socket?.emit("UPDATE_PROJECT_SETTINGS", { projectId: project.id, branch: draft.branch, coordinatorModel: draft.coordinatorModel, developerModel: draft.developerModel, installCommand: draft.installCommand, frontendCommand: draft.frontendCommand, backendCommand: draft.backendCommand, testCommand: draft.testCommand, toolPermissions, ...(agentCredential ? { agentCredential } : {}), ...(clearAgentCredential ? { clearAgentCredential: true } : {}) });
-    onSave({ ...draft, toolPermissions, agentCredentialConfigured: clearAgentCredential ? false : Boolean(agentCredential || project.agentCredentialConfigured) });
+    setSaving(true);
+    setSaveError("");
+    try {
+      const result = await api<{ project: Project }>(`/api/projects/${project.id}/settings`, { method: "PATCH", body: JSON.stringify({ branch: draft.branch, coordinatorModel: draft.coordinatorModel, developerModel: draft.developerModel, installCommand: draft.installCommand, frontendCommand: draft.frontendCommand, backendCommand: draft.backendCommand, testCommand: draft.testCommand, toolPermissions, ...(agentCredential ? { agentCredential } : {}), ...(clearAgentCredential ? { clearAgentCredential: true } : {}) }) });
+      onSave({ ...project, ...result.project, members: project.members, onlineCount: project.onlineCount });
+    } catch (reason) {
+      setSaveError(reason instanceof Error ? reason.message : "Project settings could not be saved.");
+      setSaving(false);
+    }
   };
   const detectCommands = async () => {
     setDetectingCommands(true);
@@ -831,7 +894,7 @@ function ProjectSettingsModal({ project, socket, onClose, onInitialize, onSave }
     <div className="flex border-b border-zinc-100 px-5 sm:px-6">{(["repository", "agent", "commands"] as const).map((item) => <button key={item} onClick={() => setTab(item)} className={cx("relative px-3 py-3 text-[10px] font-medium capitalize", tab === item ? "text-zinc-900" : "text-zinc-400")}>{item}{tab === item && <span className="absolute inset-x-2 bottom-0 h-[2px] bg-zinc-900" />}</button>)}</div>
     <div className="min-h-[370px] p-5 sm:p-6">
       {tab === "repository" && <div className="space-y-5"><div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4"><div className="flex items-center gap-2 text-[11px] font-semibold"><Github size={15} /> {project.repositoryOwner}/{project.repositoryName}<span className="ml-auto flex items-center gap-1 text-[9px] font-medium text-emerald-700"><CheckCircle2 size={11} /> Write access verified</span></div><p className="mt-2 text-[9px] leading-4 text-zinc-500">The remote branch is the source of truth. Every companion hard-resets tracked files before execution.</p></div><div className="grid gap-4 sm:grid-cols-2"><Field label="Repository owner"><input disabled value={project.repositoryOwner} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field><Field label="Repository"><input disabled value={project.repositoryName} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field></div><Field label="Configured branch" hint="History rewriting must be allowed for rollback"><div className="relative"><GitBranch size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft.branch} onChange={(event) => setDraft({ ...draft, branch: event.target.value })} className={cx(fieldClass, "pl-9")} /></div></Field><div className="flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[9px] leading-4 text-amber-900"><AlertTriangle size={14} className="mt-0.5 shrink-0" /> Destructive rollback rewrites this branch with force-with-lease. Protected branches may reject the operation safely.</div></div>}
-      {tab === "agent" && <div className="space-y-5"><div className="grid gap-4 sm:grid-cols-2"><Field label="Coordinator model" hint="Classifies only"><select value={draft.coordinatorModel} onChange={(event) => setDraft({ ...draft, coordinatorModel: event.target.value })} className={fieldClass}><option>coordinator-lite</option><option>gpt-5-mini</option><option>local-classifier</option></select></Field><Field label="Developer model" hint="Runs locally"><select value={draft.developerModel} onChange={(event) => setDraft({ ...draft, developerModel: event.target.value })} className={fieldClass}><option>gpt-5.6-sol</option><option>local-agent</option><option>command</option><option>demo</option></select></Field></div><Field label={project.agentCredentialConfigured ? "Replace shared OpenAI key (optional)" : "Shared OpenAI key"} hint="One project owner configures this once"><input type="password" autoComplete="off" value={agentCredential} disabled={clearAgentCredential} onChange={(event) => setAgentCredential(event.target.value)} placeholder={project.agentCredentialConfigured ? "••••••••••••••••  (configured)" : "sk-…"} className={fieldClass} /></Field><div className="flex items-center justify-between rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5"><div><div className="text-[10px] font-medium text-zinc-700">{project.agentCredentialConfigured ? "Shared key configured" : "No shared key configured"}</div><div className="mt-0.5 text-[9px] text-zinc-400">The key is never returned to browsers or written to activity logs.</div></div>{project.agentCredentialConfigured && <button type="button" onClick={() => { setClearAgentCredential((value) => !value); setAgentCredential(""); }} className={cx("rounded-lg px-3 py-1.5 text-[9px] font-medium", clearAgentCredential ? "bg-red-600 text-white" : "border border-zinc-200 bg-white text-red-600")}>{clearAgentCredential ? "Will remove on save" : "Remove key"}</button>}</div><div><div className="text-[10px] font-semibold text-zinc-700">Tool permissions</div><div className="mt-2 divide-y divide-zinc-100 rounded-xl border border-zinc-200 px-3">{Object.entries(permissions).map(([name, enabled]) => <label key={name} className="flex items-center py-2.5 text-[10px]"><span className="text-zinc-600">{name}</span><button type="button" aria-pressed={enabled} onClick={() => setPermissions({ ...permissions, [name]: !enabled })} className={cx("ml-auto h-5 w-9 rounded-full p-0.5 transition", enabled ? "bg-zinc-900" : "bg-zinc-200")}><span className={cx("block size-4 rounded-full bg-white shadow-sm transition-transform", enabled && "translate-x-4")} /></button></label>)}</div></div></div>}
+      {tab === "agent" && <div className="space-y-5"><div className="grid gap-4 sm:grid-cols-2"><Field label="Coordinator model" hint="Classifies active-task refinements"><select value={draft.coordinatorModel.startsWith("gpt-") ? draft.coordinatorModel : "gpt-5-mini"} onChange={(event) => setDraft({ ...draft, coordinatorModel: event.target.value })} className={fieldClass}><option value="gpt-5-mini">GPT-5 mini</option><option value="gpt-5">GPT-5</option><option value="gpt-4.1-mini">GPT-4.1 mini</option></select></Field><Field label="Developer model" hint="Runs locally"><select value={draft.developerModel} onChange={(event) => setDraft({ ...draft, developerModel: event.target.value })} className={fieldClass}><option value="gpt-5.6-sol">GPT-5.6 Sol (OpenAI)</option><option value="local-agent">OpenAI agent (default model)</option><option value="command">Local command agent</option><option value="demo">Demo only (placeholder change)</option></select></Field></div>{!["demo", "command"].includes(draft.developerModel) && !project.agentCredentialConfigured && !agentCredential && <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-[10px] leading-4 text-red-700"><AlertTriangle size={14} className="mt-0.5 shrink-0" /><span><strong>OpenAI key required.</strong> Coding requests cannot start until a project owner saves the shared key below.</span></div>}<Field label={project.agentCredentialConfigured ? "Replace shared OpenAI key (optional)" : "Shared OpenAI key"} hint="Used by both the coordinator and local developer agent"><input type="password" autoComplete="off" value={agentCredential} disabled={clearAgentCredential} onChange={(event) => setAgentCredential(event.target.value)} placeholder={project.agentCredentialConfigured ? "••••••••••••••••  (configured)" : "sk-…"} className={fieldClass} /></Field><div className="flex items-center justify-between rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5"><div><div className="text-[10px] font-medium text-zinc-700">{project.agentCredentialConfigured && !clearAgentCredential ? "Shared key configured" : "No shared key configured"}</div><div className="mt-0.5 text-[9px] text-zinc-400">The key is never returned to browsers or written to activity logs.</div></div>{project.agentCredentialConfigured && <button type="button" onClick={() => { setClearAgentCredential((value) => !value); setAgentCredential(""); }} className={cx("rounded-lg px-3 py-1.5 text-[9px] font-medium", clearAgentCredential ? "bg-red-600 text-white" : "border border-zinc-200 bg-white text-red-600")}>{clearAgentCredential ? "Will remove on save" : "Remove key"}</button>}</div><div><div className="text-[10px] font-semibold text-zinc-700">Tool permissions</div><div className="mt-2 divide-y divide-zinc-100 rounded-xl border border-zinc-200 px-3">{Object.entries(permissions).map(([name, enabled]) => <label key={name} className="flex items-center py-2.5 text-[10px]"><span className="text-zinc-600">{name}</span><button type="button" aria-pressed={enabled} onClick={() => setPermissions({ ...permissions, [name]: !enabled })} className={cx("ml-auto h-5 w-9 rounded-full p-0.5 transition", enabled ? "bg-zinc-900" : "bg-zinc-200")}><span className={cx("block size-4 rounded-full bg-white shadow-sm transition-transform", enabled && "translate-x-4")} /></button></label>)}</div></div></div>}
       {tab === "commands" && <div className="space-y-4">
         <div className="flex items-center justify-between gap-4 rounded-xl border border-zinc-900 bg-zinc-950 p-4 text-white"><div><div className="flex items-center gap-2 text-[11px] font-semibold"><Zap size={13} fill="currentColor" /> Initialize or complete setup</div><p className="mt-1 text-[9px] leading-4 text-zinc-400">Works for new repositories and existing websites whose run or validation commands are missing. Existing application code is preserved.</p></div><button type="button" onClick={onInitialize} className="shrink-0 rounded-lg bg-white px-3 py-2 text-[9px] font-semibold text-zinc-950 hover:bg-zinc-100">Choose stack</button></div>
         <div className="flex items-start justify-between gap-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3"><p className="text-[10px] leading-4 text-zinc-500">Relaycode inspects manifests, README instructions, workspace files, Makefiles, environment examples, and CI configuration. When a shared OpenAI key is configured, the project agent selects the best repository-grounded commands. Every result remains editable.</p><button type="button" disabled={detectingCommands} onClick={() => void detectCommands()} className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[9px] font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:text-zinc-300"><RefreshCw size={11} className={detectingCommands ? "animate-spin" : ""} />{detectingCommands ? "Agent inspecting…" : "Infer again"}</button></div>
@@ -839,7 +902,7 @@ function ProjectSettingsModal({ project, socket, onClose, onInitialize, onSave }
         {(["installCommand", "frontendCommand", "backendCommand", "testCommand"] as const).map((key) => <Field key={key} label={key.replace("Command", " command").replace(/^./, (character) => character.toUpperCase())} hint={key === "testCommand" ? "Must succeed before a push" : undefined}><div className="relative"><TerminalSquare size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft[key] ?? ""} onChange={(event) => setDraft({ ...draft, [key]: event.target.value || null })} placeholder={key === "installCommand" ? "npm install" : key === "frontendCommand" ? "npm run dev" : key === "backendCommand" ? "npm run server" : "npm test"} className={cx(fieldClass, "pl-9 font-mono")} /></div></Field>)}
       </div>}
     </div>
-    <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-5 py-4 sm:px-6"><button onClick={onClose} className="rounded-xl px-4 py-2.5 text-[10px] font-medium text-zinc-500 hover:bg-zinc-50">Cancel</button><button onClick={save} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Save changes</button></div>
+    <div className="border-t border-zinc-100 px-5 py-4 sm:px-6">{saveError && <div className="mb-3 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-[10px] leading-4 text-red-700"><AlertTriangle size={13} className="mt-0.5 shrink-0" />{saveError}</div>}<div className="flex items-center justify-end gap-2"><button onClick={onClose} disabled={saving} className="rounded-xl px-4 py-2.5 text-[10px] font-medium text-zinc-500 hover:bg-zinc-50 disabled:opacity-50">Cancel</button><button onClick={() => void save()} disabled={saving} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white disabled:bg-zinc-400">{saving ? "Saving…" : "Save changes"}</button></div></div>
   </Modal>;
 }
 
@@ -957,7 +1020,8 @@ function CompanionConnectStatus({ state, onClose }: { state: PairingState; onClo
 }
 
 function CancelModal({ task, onClose, onConfirm }: { task: Task; onClose: () => void; onConfirm: () => void }) {
-  return <Modal onClose={onClose} width="max-w-md"><ModalHeader icon={<Square size={14} fill="currentColor" />} title={`Cancel Request #${task.number}?`} description="The developer process will stop and release the project execution lock." onClose={onClose} /><div className="p-6"><div className="rounded-xl bg-zinc-50 p-3 text-[10px] leading-4 text-zinc-600">Local tracked changes will be discarded and the executor’s repository will reset to the current remote branch. Untracked files are preserved.</div><div className="mt-5 flex justify-end gap-2"><button onClick={onClose} className="rounded-xl px-4 py-2.5 text-[10px] font-medium text-zinc-500">Keep running</button><button onClick={onConfirm} className="rounded-xl bg-red-600 px-4 py-2.5 text-[10px] font-medium text-white">Cancel task</button></div></div></Modal>;
+  const pending = ["QUEUED", "WAITING_FOR_REQUESTER", "REMOTE_DIVERGED"].includes(task.status);
+  return <Modal onClose={onClose} width="max-w-md"><ModalHeader icon={pending ? <Trash2 size={15} /> : <Square size={14} fill="currentColor" />} title={pending ? `Delete Request #${task.number}?` : `Cancel Request #${task.number}?`} description={pending ? "This request will be removed from the execution queue." : "The developer process will stop and release the project execution lock."} onClose={onClose} /><div className="p-6"><div className="rounded-xl bg-zinc-50 p-3 text-[10px] leading-4 text-zinc-600">{pending ? "The request will be retained as cancelled in project history for attribution and auditing. It will not execute and no repository files will be changed." : "Local tracked changes will be discarded and the executor’s repository will reset to the current remote branch. Untracked files are preserved."}</div><div className="mt-5 flex justify-end gap-2"><button onClick={onClose} className="rounded-xl px-4 py-2.5 text-[10px] font-medium text-zinc-500">{pending ? "Keep request" : "Keep running"}</button><button onClick={onConfirm} className="rounded-xl bg-red-600 px-4 py-2.5 text-[10px] font-medium text-white">{pending ? "Delete request" : "Cancel task"}</button></div></div></Modal>;
 }
 
 function RollbackModal({ task, allTasks, socket, serverMode, onClose, onConfirm }: { task: Task; allTasks: Task[]; socket: AppSocket | null; serverMode: "connecting" | "live" | "demo"; onClose: () => void; onConfirm: (discarded: Task[]) => void }) {

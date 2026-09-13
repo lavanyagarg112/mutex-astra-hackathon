@@ -3,12 +3,17 @@ import { activeStatuses, QUEUE_PRIORITY, type RepositoryInitialization, type Sta
 import { recordActivity } from "./activity.js";
 import { HttpError, requireMember } from "./auth.js";
 import { githubTokenFor } from "./auth-routes.js";
-import { ConservativeCoordinator, type CoordinatorAgent } from "./coordinator.js";
+import { OpenAICoordinator } from "./coordinator.js";
 import { inferGitHubRepositoryCommands } from "./github.js";
 import { ConnectionRegistry, type RelayServer, type RelaySocket } from "./realtime.js";
 import { fullTaskInclude, serializeProject, serializeTask } from "./serialize.js";
 
 const ACTIVE = activeStatuses as TaskStatus[];
+const MISSING_AGENT_KEY = "No OpenAI key is configured for this project. A project owner must add the shared key in Project settings → Agent before coding requests can run.";
+
+function usesSharedOpenAI(developerModel: string): boolean {
+  return !["demo", "command"].includes(developerModel);
+}
 const ALLOWED_TRANSITIONS: Partial<Record<TaskStatus, TaskStatus[]>> = {
   SYNCING: ["PLANNING", "FAILED", "CANCELLED"],
   PLANNING: ["EDITING", "VALIDATING", "PAUSED", "FAILED", "CANCELLED"],
@@ -25,7 +30,7 @@ export class Scheduler {
     private readonly prisma: PrismaClient,
     private readonly io: RelayServer,
     readonly connections: ConnectionRegistry,
-    private readonly coordinator: CoordinatorAgent = new ConservativeCoordinator(),
+    private readonly coordinator = new OpenAICoordinator(),
   ) {}
 
   schedule(projectId: string) {
@@ -39,7 +44,13 @@ export class Scheduler {
       include: { rootMessage: true },
     });
     if (active?.amendable) {
-      const decision = await this.coordinator.classify({ incoming: body, activeRequest: active.rootMessage.body });
+      const project = await this.prisma.project.findUnique({
+        where: { id: projectId },
+        select: { agentCredential: true, coordinatorModel: true },
+      });
+      const decision = project?.agentCredential
+        ? await this.coordinator.classify({ incoming: body, activeRequest: active.rootMessage.body, apiKey: project.agentCredential, model: project.coordinatorModel })
+        : { kind: "INDEPENDENT" as const, confidence: 0, reason: "No shared OpenAI credential configured" };
       if (decision.kind === "REFINEMENT" && decision.confidence >= 0.85) {
         return this.attachInFlightRefinement(userId, active.id, body);
       }
@@ -208,6 +219,24 @@ export class Scheduler {
 
   async cancel(userId: string, projectId: string, taskId: string) {
     await requireMember(this.prisma, projectId, userId, { write: true });
+    const queued = await this.prisma.task.findFirst({
+      where: { id: taskId, projectId, status: { in: ["QUEUED", "WAITING_FOR_REQUESTER", "REMOTE_DIVERGED"] } },
+      select: { id: true, number: true },
+    });
+    if (queued) {
+      const cancelled = await this.prisma.task.updateMany({
+        where: { id: queued.id, projectId, status: { in: ["QUEUED", "WAITING_FOR_REQUESTER", "REMOTE_DIVERGED"] } },
+        data: { status: "CANCELLED", amendable: false, shortStatus: "Removed from queue", failureReason: null, completedAt: new Date() },
+      });
+      if (cancelled.count) {
+        await recordActivity(this.prisma, this.io, { projectId, taskId, userId, category: "TASK", message: `#${queued.number} removed from queue` });
+        this.taskUpdated(projectId, taskId);
+        void this.schedule(projectId);
+        return;
+      }
+      // The scheduler may have claimed it between the read and update. In that
+      // case, continue through the active-task cancellation path below.
+    }
     const task = await this.activeTask(projectId, taskId);
     await this.prisma.task.update({ where: { id: task.id }, data: { status: "CANCELLED", amendable: false, shortStatus: "Cancelled", completedAt: new Date() } });
     if (task.executorUserId) this.connections.emitToMapped(task.executorUserId, projectId, "CANCEL_TASK", { projectId, taskId });
@@ -305,6 +334,11 @@ export class Scheduler {
     parentTaskId: string | null,
     options: { executionMode?: "NORMAL" | "INITIALIZATION"; initializationConfig?: RepositoryInitialization } = {},
   ) {
+    const projectConfiguration = await this.prisma.project.findUnique({ where: { id: projectId }, select: { agentCredential: true, developerModel: true } });
+    if (!projectConfiguration) throw new HttpError(404, "Project not found");
+    if (usesSharedOpenAI(projectConfiguration.developerModel) && !projectConfiguration.agentCredential) {
+      throw new HttpError(422, MISSING_AGENT_KEY);
+    }
     const task = await this.prisma.$transaction(async (tx) => {
       const counters = await tx.project.update({ where: { id: projectId }, data: { nextTaskNumber: { increment: 1 }, nextQueueSequence: { increment: 1 } } });
       const message = await tx.message.create({ data: { projectId, authorId: userId, body, ...(parentTaskId ? { replyToMessageId: (await tx.task.findUniqueOrThrow({ where: { id: parentTaskId } })).rootMessageId } : {}) } });
@@ -356,6 +390,14 @@ export class Scheduler {
       orderBy: [{ queuePriority: "desc" }, { queueSequence: "asc" }],
       include: fullTaskInclude,
     });
+    if (usesSharedOpenAI(project.developerModel) && !project.agentCredential) {
+      for (const task of candidates) {
+        await this.prisma.task.update({ where: { id: task.id }, data: { status: "FAILED", shortStatus: "OpenAI key required", failureReason: MISSING_AGENT_KEY, completedAt: new Date(), amendable: false } });
+        await recordActivity(this.prisma, this.io, { projectId, taskId: task.id, category: "ERROR", message: MISSING_AGENT_KEY });
+        this.taskUpdated(projectId, task.id);
+      }
+      return;
+    }
     for (const task of candidates) {
       if (!this.connections.isEligible(task.requestedByUserId, projectId)) {
         if (task.status !== "WAITING_FOR_REQUESTER") {

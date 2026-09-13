@@ -98,7 +98,7 @@ model Project {
   repositoryName   String
   repositoryUrl    String
   branch            String @default("main")
-  coordinatorModel String @default("coordinator-lite")
+  coordinatorModel String @default("gpt-5-mini")
   developerModel   String @default("local-agent")
   agentCredential  String?
   toolPermissions  Json @default("{\"fileRead\":true,\"fileWrite\":true,\"shell\":true,\"git\":true,\"tests\":true,\"network\":false}")
