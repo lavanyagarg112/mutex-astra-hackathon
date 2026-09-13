@@ -58,6 +58,53 @@ button { -webkit-tap-highlight-color: transparent; }
 .enter-up { animation: enter-up .35s cubic-bezier(.22,.8,.3,1) both; }
 .pulse-soft { animation: pulse-soft 1.8s ease-in-out infinite; }
 
+@keyframes pixel-idle {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1px); }
+}
+@keyframes pixel-run {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+@keyframes pixel-jump {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  35% { transform: translateY(-7px) scaleY(1.08); }
+  65% { transform: translateY(0) scaleY(.9); }
+}
+@keyframes pixel-angry {
+  0%, 100% { transform: translateX(0) rotate(0deg); }
+  20% { transform: translateX(-2px) rotate(-4deg); }
+  40% { transform: translateX(2px) rotate(4deg); }
+  60% { transform: translateX(-2px) rotate(-3deg); }
+  80% { transform: translateX(2px) rotate(3deg); }
+}
+@keyframes pixel-punched {
+  0% { transform: translateX(0) rotate(0deg) scale(1); }
+  30% { transform: translateX(-6px) rotate(-14deg) scale(.92); }
+  60% { transform: translateX(3px) rotate(8deg) scale(1.05); }
+  100% { transform: translateX(0) rotate(0deg) scale(1); }
+}
+@keyframes pixel-loved {
+  0%, 100% { transform: scale(1) translateY(0); }
+  50% { transform: scale(1.15) translateY(-4px); }
+}
+@keyframes pixel-excited {
+  0% { transform: scale(1) translateY(0); }
+  22% { transform: scale(1.14) translateY(-38px); }
+  42% { transform: scale(1.04) translateY(0); }
+  62% { transform: scale(1.1) translateY(-20px); }
+  82% { transform: scale(1.02) translateY(0); }
+  100% { transform: scale(1) translateY(0); }
+}
+
+.pixel-pose-idle { animation: pixel-idle 2.4s ease-in-out infinite; }
+.pixel-pose-running { animation: pixel-run .45s ease-in-out infinite; }
+.pixel-pose-verifying { animation: pixel-jump .9s ease-in-out infinite; }
+.pixel-pose-stuck { animation: pixel-angry .4s ease-in-out infinite; }
+.pixel-pose-punched { animation: pixel-punched .5s ease-out 1; }
+.pixel-pose-loved { animation: pixel-loved .55s ease-in-out 2; }
+.pixel-pose-excited { animation: pixel-excited .85s cubic-bezier(.34,1.56,.64,1) 1; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }

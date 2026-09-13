@@ -9,6 +9,7 @@ import { createAuthRouter } from "./auth-routes.js";
 import { prisma } from "./db.js";
 import { createApiRouter } from "./routes.js";
 import { ConnectionRegistry, type RelayServer } from "./realtime.js";
+import { BrowserPresence } from "./presence.js";
 import { RuntimeState } from "./runtime.js";
 import { Scheduler } from "./scheduler.js";
 import { installSocketHandlers } from "./socket.js";
@@ -19,6 +20,7 @@ const origin = process.env.WEB_ORIGIN ?? "http://localhost:5173";
 const io: RelayServer = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, { cors: { origin, credentials: true }, maxHttpBufferSize: 2_500_000 });
 const runtime = new RuntimeState();
 const scheduler = new Scheduler(prisma, io, new ConnectionRegistry());
+const browserPresence = new BrowserPresence();
 
 app.disable("x-powered-by");
 app.use(cors({ origin, credentials: true }));
@@ -30,7 +32,7 @@ app.get("/api/companion/download", (_req, res) => {
   return res.redirect(url);
 });
 app.use("/api/auth", createAuthRouter(prisma));
-app.use("/api", createApiRouter(prisma, io, scheduler, runtime));
+app.use("/api", createApiRouter(prisma, io, scheduler, runtime, browserPresence));
 app.use("/api", (error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error("Unhandled API error", error instanceof Error ? error.message : "Unknown error");
   res.status(500).json({ error: "Internal server error" });
@@ -42,7 +44,7 @@ if (process.env.NODE_ENV === "production") {
 }
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 
-installSocketHandlers(io, prisma, scheduler, runtime);
+installSocketHandlers(io, prisma, scheduler, runtime, browserPresence);
 
 const port = Number(process.env.PORT ?? 4100);
 httpServer.listen(port, () => console.log(`RelayCode server listening on http://localhost:${port}`));

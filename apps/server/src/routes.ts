@@ -7,6 +7,7 @@ import { createAuthMiddleware, hashToken, HttpError, safeEqual, type Authenticat
 import { githubTokenFor } from "./auth-routes.js";
 import { getGitHubRepository, inferGitHubRepositoryCommands, listGitHubRepositories } from "./github.js";
 import type { RelayServer } from "./realtime.js";
+import type { BrowserPresence } from "./presence.js";
 import { queueDisplayOrder } from "./queue.js";
 import { RuntimeState } from "./runtime.js";
 import { Scheduler } from "./scheduler.js";
@@ -15,7 +16,7 @@ import { fullTaskInclude, serializeActivity, serializeProject, serializeTask, se
 const ExtendedProjectSettingsSchema = ProjectSettingsSchema;
 const ProcessControlSchema = z.object({ name: z.enum(["install", "frontend", "backend", "test", "preview"]), cwd: z.string().optional() });
 
-export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler: Scheduler, runtime: RuntimeState) {
+export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler: Scheduler, runtime: RuntimeState, presence: BrowserPresence) {
   const router = Router();
 
   router.post("/companion/pair/claim", async (req, res) => {
@@ -117,7 +118,7 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
         tasks: ordered.map(serializeTask),
         activeTask: ordered.find((task) => (activeStatuses as TaskStatus[]).includes(task.status)) ? serializeTask(ordered.find((task) => (activeStatuses as TaskStatus[]).includes(task.status))!) : null,
         queue: ordered.filter((task) => ["QUEUED", "WAITING_FOR_REQUESTER"].includes(task.status)).map(serializeTask),
-        members: members.map(({ user, role, repositoryWrite }) => ({ ...serializeUser(user), role, repositoryWrite, daemon: scheduler.connections.statusFor(user.id, project.id) })),
+        members: members.map(({ user, role, repositoryWrite }) => ({ ...serializeUser(user), role, repositoryWrite, present: presence.isOnline(project.id, user.id), daemon: scheduler.connections.statusFor(user.id, project.id) })),
         activities: activities.reverse().map(serializeActivity),
         // localhost belongs to the signed-in user's machine, so never return a
         // different member's preview process to this browser.

@@ -45,6 +45,7 @@ model User {
   name            String
   username        String @unique
   avatarUrl       String?
+  pixelCharacter  String?
   githubId        String? @unique
   githubLogin     String?
   githubToken     String?

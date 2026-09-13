@@ -7,3 +7,5 @@ apps/server/prisma/dev.db
 .relaycode
 coverage
 apps/companion/release
+.vite
+apps/web/.vite

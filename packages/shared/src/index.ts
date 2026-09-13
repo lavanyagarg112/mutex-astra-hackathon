@@ -12,10 +12,27 @@ export const TaskTypeSchema = z.enum(["NORMAL", "REFINEMENT"]);
 export type TaskType = z.infer<typeof TaskTypeSchema>;
 export const TaskPhaseSchema = z.enum(["SYNCING", "PLANNING", "EDITING", "VALIDATING", "PUSHING", "PAUSED"]);
 
+// Ids only — the actual pixel-grid art for each skin lives client-side
+// (apps/web/src/pixelCharacters.ts) since the server only ever needs to
+// validate and store which skin a user picked.
+export const PIXEL_SKIN_IDS = [
+  "bear", "pig", "penguin", "bunny",
+  "ox", "fox", "frog", "dog",
+  "ghost", "raccoon", "cat", "monkey",
+] as const;
+export const PixelSkinIdSchema = z.enum(PIXEL_SKIN_IDS);
+export type PixelSkinId = z.infer<typeof PixelSkinIdSchema>;
+
 export const UserSchema = z.object({
   id: z.string(), name: z.string(), username: z.string(), avatarUrl: z.string().nullable().optional(),
+  pixelCharacter: PixelSkinIdSchema.nullable().optional(),
 });
 export type User = z.infer<typeof UserSchema>;
+
+export const UpdateUserAppearanceSchema = z.object({ pixelCharacter: PixelSkinIdSchema });
+export const MemberInteractionSchema = z.object({
+  projectId: z.string(), targetUserId: z.string(), kind: z.enum(["punch", "love", "excited"]),
+});
 
 export const MessageSchema = z.object({
   id: z.string(), projectId: z.string(), authorId: z.string(), body: z.string().min(1).max(10_000),
@@ -125,6 +142,8 @@ export interface ClientToServerEvents {
   CANCEL_ACTIVE_TASK: (payload: z.infer<typeof TaskControlSchema>) => void;
   ROLLBACK_TASK: (payload: z.infer<typeof RollbackTaskSchema>) => void;
   UPDATE_PROJECT_SETTINGS: (payload: z.infer<typeof ProjectSettingsSchema>) => void;
+  UPDATE_USER_APPEARANCE: (payload: z.infer<typeof UpdateUserAppearanceSchema>) => void;
+  MEMBER_INTERACTION: (payload: z.infer<typeof MemberInteractionSchema>) => void;
 }
 
 export interface ServerToClientEvents {
@@ -144,9 +163,12 @@ export interface ServerToClientEvents {
   MESSAGE_CREATED: (payload: { projectId: string; messageId: string }) => void;
   ACTIVITY_CREATED: (payload: { projectId: string }) => void;
   MEMBER_STATUS_CHANGED: (payload: { projectId: string; userId: string; online: boolean }) => void;
+  MEMBER_PRESENCE_CHANGED: (payload: { projectId: string; userId: string; present: boolean }) => void;
   SYNC_STATUS_CHANGED: (payload: { projectId: string; userId: string; commitSha: string; ok: boolean }) => void;
   DIFF_AVAILABLE: (payload: { projectId: string; taskId: string }) => void;
   PROCESS_STATUS_CHANGED: (payload: { projectId: string; userId: string }) => void;
+  MEMBER_APPEARANCE_CHANGED: (payload: { projectId: string; userId: string; pixelCharacter: PixelSkinId }) => void;
+  MEMBER_INTERACTION: (payload: { projectId: string; fromUserId: string; targetUserId: string; kind: "punch" | "love" | "excited" }) => void;
   ERROR: (payload: { message: string }) => void;
 }
 

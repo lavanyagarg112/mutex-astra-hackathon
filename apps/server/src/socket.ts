@@ -6,26 +6,29 @@ import {
   DaemonConnectedSchema,
   GitPushResultSchema,
   GitSyncResultSchema,
+  MemberInteractionSchema,
   ProjectSettingsSchema,
   RollbackResultSchema,
   RollbackTaskSchema,
   TaskControlSchema,
   TaskOutputSchema,
   TaskStatusEventSchema,
+  UpdateUserAppearanceSchema,
 } from "@relaycode/shared";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { recordActivity } from "./activity.js";
 import { demoAuthEnabled, hashToken, HttpError, readCookie, requireMember, SESSION_COOKIE } from "./auth.js";
 import type { RelayServer, RelaySocket } from "./realtime.js";
+import type { BrowserPresence } from "./presence.js";
 import { RuntimeState } from "./runtime.js";
 import { Scheduler } from "./scheduler.js";
 
 const ExtendedProjectSettingsSchema = ProjectSettingsSchema;
 
-export function installSocketHandlers(io: RelayServer, prisma: PrismaClient, scheduler: Scheduler, runtime: RuntimeState) {
+export function installSocketHandlers(io: RelayServer, prisma: PrismaClient, scheduler: Scheduler, runtime: RuntimeState, presence: BrowserPresence) {
   io.on("connection", (socket) => {
-    void joinBrowserRooms(socket, prisma);
+    void joinBrowserRooms(socket, prisma, io, presence);
 
     socket.on("DAEMON_CONNECTED", (raw) => void guarded(socket, async () => {
       const payload = DaemonConnectedSchema.parse(raw);
@@ -132,18 +135,54 @@ export function installSocketHandlers(io: RelayServer, prisma: PrismaClient, sch
       io.to(`project:${payload.projectId}:web`).emit("QUEUE_UPDATED", { projectId: payload.projectId });
     }));
 
+    socket.on("UPDATE_USER_APPEARANCE", (raw) => void guarded(socket, async () => {
+      const payload = UpdateUserAppearanceSchema.parse(raw);
+      const userId = browserUser(socket);
+      await prisma.user.update({ where: { id: userId }, data: { pixelCharacter: payload.pixelCharacter } });
+      const memberships = await prisma.projectMember.findMany({ where: { userId }, select: { projectId: true } });
+      for (const { projectId } of memberships) {
+        io.to(`project:${projectId}:web`).emit("MEMBER_APPEARANCE_CHANGED", { projectId, userId, pixelCharacter: payload.pixelCharacter });
+      }
+    }));
+    socket.on("MEMBER_INTERACTION", (raw) => void guarded(socket, async () => {
+      const payload = MemberInteractionSchema.parse(raw);
+      const fromUserId = browserUser(socket);
+      await requireMember(prisma, payload.projectId, fromUserId);
+      await requireMember(prisma, payload.projectId, payload.targetUserId);
+      io.to(`project:${payload.projectId}:web`).emit("MEMBER_INTERACTION", { projectId: payload.projectId, fromUserId, targetUserId: payload.targetUserId, kind: payload.kind });
+    }));
+
     socket.on("disconnect", () => void (async () => {
       const removed = scheduler.connections.unregister(socket.id);
-      if (!removed) return;
-      for (const projectId of removed.mappings.keys()) {
-        if (!scheduler.connections.isOnline(removed.userId)) io.to(`project:${projectId}:web`).emit("MEMBER_STATUS_CHANGED", { projectId, userId: removed.userId, online: false });
-        await scheduler.schedule(projectId);
+      if (removed) {
+        for (const projectId of removed.mappings.keys()) {
+          if (!scheduler.connections.isOnline(removed.userId)) io.to(`project:${projectId}:web`).emit("MEMBER_STATUS_CHANGED", { projectId, userId: removed.userId, online: false });
+          await scheduler.schedule(projectId);
+        }
+      }
+      const browserUserId = socket.data.browserUserId as string | undefined;
+      const browserProjectIds = (socket.data.browserProjectIds as string[] | undefined) ?? [];
+      if (browserUserId) {
+        for (const projectId of browserProjectIds) {
+          if (presence.leave(projectId, browserUserId)) {
+            io.to(`project:${projectId}:web`).emit("MEMBER_PRESENCE_CHANGED", { projectId, userId: browserUserId, present: false });
+          }
+        }
       }
     })());
   });
 }
 
-async function joinBrowserRooms(socket: RelaySocket, prisma: PrismaClient) {
+// The daemon (companion) connects through this same socket.io server and
+// identifies itself via `auth.client === "daemon"`. It must never count
+// toward browser presence — that's specifically "does this person have the
+// web app open," not "is their local companion running."
+function isDaemonHandshake(socket: RelaySocket): boolean {
+  return socket.handshake.auth?.client === "daemon";
+}
+
+async function joinBrowserRooms(socket: RelaySocket, prisma: PrismaClient, io: RelayServer, presence: BrowserPresence) {
+  if (isDaemonHandshake(socket)) return;
   const rawSession = readCookie(socket.handshake.headers.cookie, SESSION_COOKIE);
   const session = rawSession ? await prisma.authSession.findUnique({ where: { tokenHash: hashToken(rawSession) } }) : null;
   const candidate = session && session.expiresAt > new Date()
@@ -154,7 +193,14 @@ async function joinBrowserRooms(socket: RelaySocket, prisma: PrismaClient) {
   if (!user) return;
   socket.data.browserUserId = user.id;
   const memberships = await prisma.projectMember.findMany({ where: { userId: user.id }, select: { projectId: true } });
-  await Promise.all(memberships.map(({ projectId }) => socket.join(`project:${projectId}:web`)));
+  const projectIds = memberships.map((membership) => membership.projectId);
+  socket.data.browserProjectIds = projectIds;
+  await Promise.all(projectIds.map((projectId) => socket.join(`project:${projectId}:web`)));
+  for (const projectId of projectIds) {
+    if (presence.join(projectId, user.id)) {
+      io.to(`project:${projectId}:web`).emit("MEMBER_PRESENCE_CHANGED", { projectId, userId: user.id, present: true });
+    }
+  }
 }
 
 function browserUser(socket: RelaySocket) {

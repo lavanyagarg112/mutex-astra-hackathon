@@ -1,5 +1,9 @@
 import type { ActivityEvent, Message, Prisma, Project, Task, User } from "@prisma/client";
-import { redactSensitive } from "@relaycode/shared";
+import { PIXEL_SKIN_IDS, redactSensitive, type PixelSkinId } from "@relaycode/shared";
+
+function pixelSkinOf(value: string | null): PixelSkinId | null {
+  return value && (PIXEL_SKIN_IDS as readonly string[]).includes(value) ? (value as PixelSkinId) : null;
+}
 
 export function serializeProject(project: Project) {
   const { agentCredential: _credential, toolPermissions, ...safe } = project;
@@ -12,7 +16,7 @@ export function serializeProject(project: Project) {
 }
 
 export function serializeUser(user: User) {
-  return { id: user.id, name: user.name, username: user.username, avatarUrl: user.avatarUrl };
+  return { id: user.id, name: user.name, username: user.username, avatarUrl: user.avatarUrl, pixelCharacter: pixelSkinOf(user.pixelCharacter) };
 }
 
 export function serializeMessage(message: Message & { author?: User }) {

@@ -53,14 +53,16 @@ import {
   Zap,
 } from "lucide-react";
 import { forwardRef, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import type { Activity, Project, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
+import type { Activity, PixelSkinId, Project, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
 import { activeStatuses } from "@relaycode/shared";
-import { API_URL, api, beginGithubLogin, connectSocket, getActiveUserId, loginWithUsername, setActiveUserId } from "./lib/api";
+import { API_URL, api, beginGithubLogin, connectSocket, getActiveUserId, loginWithUsername, logout, setActiveUserId } from "./lib/api";
 import type { Socket } from "socket.io-client";
 import type { ClientToServerEvents, ServerToClientEvents } from "@relaycode/shared";
+import { PixelAvatar, PixelCrew } from "./PixelCrew";
+import { PIXEL_SKINS } from "./pixelCharacters";
 
 type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
-type Member = User & { online: boolean; daemonVersion?: string; syncedSha?: string; mapped?: boolean; synchronized?: boolean; localPath?: string; color: string };
+type Member = User & { online: boolean; present: boolean; daemonVersion?: string; syncedSha?: string; mapped?: boolean; synchronized?: boolean; localPath?: string; color: string };
 type ProjectItem = Project & { members: Member[]; onlineCount: number };
 type ProcessInfo = { name: string; status: "running" | "stopped" | "starting" | "failed"; port?: number; url?: string };
 type ProjectData = { project: ProjectItem; tasks: Task[]; activity: Activity[]; processes: ProcessInfo[] };
@@ -74,9 +76,9 @@ type InferredCommands = Pick<Project, "installCommand" | "frontendCommand" | "ba
 };
 type PairingState = { status: "pairing" | "ready" | "error"; code?: string; message?: string };
 
-const alice: Member = { id: "alice", name: "Alice Chen", username: "alice", online: true, daemonVersion: "0.4.2", syncedSha: "4af71c2", color: "#343434" };
-const bob: Member = { id: "bob", name: "Bob Rivera", username: "bob", online: true, daemonVersion: "0.4.2", syncedSha: "4af71c2", color: "#8e6b3d" };
-const charlie: Member = { id: "charlie", name: "Charlie Park", username: "charlie", online: false, daemonVersion: "0.4.1", syncedSha: "91bc8e0", color: "#6d7079" };
+const alice: Member = { id: "alice", name: "Alice Chen", username: "alice", online: true, present: true, daemonVersion: "0.4.2", syncedSha: "4af71c2", color: "#343434" };
+const bob: Member = { id: "bob", name: "Bob Rivera", username: "bob", online: true, present: true, daemonVersion: "0.4.2", syncedSha: "4af71c2", color: "#8e6b3d" };
+const charlie: Member = { id: "charlie", name: "Charlie Park", username: "charlie", online: false, present: false, daemonVersion: "0.4.1", syncedSha: "91bc8e0", color: "#6d7079" };
 
 const statusMeta: Record<TaskStatus, { label: string; tone: string; dot: string }> = {
   QUEUED: { label: "Queued", tone: "bg-zinc-100 text-zinc-600", dot: "bg-zinc-400" },
@@ -107,8 +109,8 @@ function normalizeProjectPayload(raw: unknown): ProjectData | null {
   const source = "data" in raw && raw.data && typeof raw.data === "object" ? raw.data as Record<string, unknown> : raw as Record<string, unknown>;
   if (!source.project || !Array.isArray(source.tasks)) return null;
   const serverMembers = Array.isArray(source.members) ? source.members.map((entry) => {
-    const member = entry as User & { daemon?: { online?: boolean; version?: string | null; mapped?: boolean; synchronized?: boolean; path?: string | null } };
-    return { ...member, online: Boolean(member.daemon?.online), daemonVersion: member.daemon?.version ?? undefined, mapped: Boolean(member.daemon?.mapped), synchronized: Boolean(member.daemon?.synchronized), localPath: member.daemon?.path ?? undefined, color: member.username === "alice" ? "#343434" : member.username === "bob" ? "#8e6b3d" : "#6d7079" } satisfies Member;
+    const member = entry as User & { present?: boolean; daemon?: { online?: boolean; version?: string | null; mapped?: boolean; synchronized?: boolean; path?: string | null } };
+    return { ...member, online: Boolean(member.daemon?.online), present: Boolean(member.present), daemonVersion: member.daemon?.version ?? undefined, mapped: Boolean(member.daemon?.mapped), synchronized: Boolean(member.daemon?.synchronized), localPath: member.daemon?.path ?? undefined, color: member.username === "alice" ? "#343434" : member.username === "bob" ? "#8e6b3d" : "#6d7079" } satisfies Member;
   }) : [];
   const project = normalizeProject({ ...(source.project as Project), members: serverMembers } as ProjectItem);
   const rawProcesses = Array.isArray(source.processes) ? source.processes : [];
@@ -229,7 +231,9 @@ function Workspace() {
     nextSocket.on("ACTIVITY_CREATED", refresh);
     nextSocket.on("DIFF_AVAILABLE", refresh);
     nextSocket.on("MEMBER_STATUS_CHANGED", refresh);
+    nextSocket.on("MEMBER_PRESENCE_CHANGED", refresh);
     nextSocket.on("PROCESS_STATUS_CHANGED", refresh);
+    nextSocket.on("MEMBER_APPEARANCE_CHANGED", refresh);
     nextSocket.on("ERROR", ({ message: error }) => toast(error, "warning"));
     return () => { mounted = false; nextSocket.disconnect(); };
     // The socket is intentionally bound to the selected project lifecycle.
@@ -299,7 +303,7 @@ function Workspace() {
         </div>
       </main>
       {modal === "createProject" && <CreateProjectModal user={currentUser} onClose={() => setModal(null)} onCreated={(project) => { const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 }); setProjects([normalized]); setProjectId(project.id); setModal(null); }} />}
-      {modal === "user" && <UserSettingsModal projects={projects} user={currentUser} onClose={() => setModal(null)} />}
+      {modal === "user" && <UserSettingsModal projects={projects} user={currentUser} socket={socket} onClose={() => setModal(null)} onUpdated={setCurrentUser} />}
     </div>;
   }
 
@@ -340,26 +344,22 @@ function Workspace() {
                 <PanelTab active={rightPanel === "activity"} icon={<TerminalSquare size={14} />} onClick={() => setRightPanel("activity")}>Activity</PanelTab>
               </div>
               {rightPanel === "preview" ? <PreviewPanel project={data.project} processes={data.processes} mode={serverMode} /> : <ActivityPanel activity={data.activity} />}
-              <div className="border-t border-zinc-200 bg-white px-5 py-3">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="flex items-center gap-1.5 font-medium text-zinc-600"><ShieldCheck size={13} /> Remote branch is canonical</span>
-                  <span className="font-mono text-zinc-400">origin/{data.project.branch}</span>
-                </div>
-              </div>
             </aside>
           </div>
         </main>
       </div>
 
-      <div className="fixed bottom-4 right-4 z-[70] flex flex-col gap-2">
+      <div className="fixed bottom-24 right-4 z-[70] flex flex-col gap-2">
         {toasts.map((item) => <div key={item.id} className={cx("enter-up flex max-w-sm items-center gap-2 rounded-xl border bg-zinc-950 px-4 py-3 text-sm text-white shadow-float", item.tone === "warning" ? "border-orange-500/40" : "border-white/10")}>
           {item.tone === "warning" ? <AlertTriangle size={15} className="text-orange-300" /> : <CheckCircle2 size={15} className="text-emerald-300" />}{item.message}
         </div>)}
       </div>
 
+      <PixelCrew members={data.project.members} activeTask={active} projectId={projectId} socket={socket} currentUserId={currentUser.id} />
+
       {modal === "project" && <ProjectSettingsModal project={data.project} socket={socket} onClose={() => setModal(null)} onSave={(project) => { setData((current) => current ? ({ ...current, project: { ...current.project, ...project } }) : current); setModal(null); toast("Project settings saved."); }} />}
       {modal === "createProject" && <CreateProjectModal user={currentUser} onClose={() => setModal(null)} onCreated={(project) => { const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 }); setProjects((current) => [...current, normalized]); setProjectId(project.id); setModal(null); toast("Project created. Open the companion to clone or connect the repository."); }} />}
-      {modal === "user" && <UserSettingsModal projects={projects} user={currentUser} onClose={() => setModal(null)} />}
+      {modal === "user" && <UserSettingsModal projects={projects} user={currentUser} socket={socket} onClose={() => setModal(null)} onUpdated={setCurrentUser} />}
       {modal === "share" && <ShareModal project={data.project} onClose={() => setModal(null)} toast={toast} />}
       {modal === "cancel" && selectedTask && <CancelModal task={selectedTask} onClose={() => setModal(null)} onConfirm={() => { emitControl("cancel", selectedTask); setModal(null); }} />}
       {modal === "rollback" && selectedTask && <RollbackModal task={selectedTask} allTasks={data.tasks} socket={socket} serverMode={serverMode} onClose={() => setModal(null)} onConfirm={(discarded) => {
@@ -783,10 +783,14 @@ function ProjectSettingsModal({ project, socket, onClose, onSave }: { project: P
   </Modal>;
 }
 
-function UserSettingsModal({ projects, user, onClose }: { projects: ProjectItem[]; user: User; onClose: () => void }) {
+function UserSettingsModal({ projects, user, socket, onClose, onUpdated }: { projects: ProjectItem[]; user: User; socket: AppSocket | null; onClose: () => void; onUpdated: (user: User) => void }) {
   const [settings, setSettings] = useState<{ online: boolean; version?: string; mappings: Record<string, string> }>({ online: false, mappings: {} });
   const [companionMessage, setCompanionMessage] = useState("");
   const [pairingCode, setPairingCode] = useState("");
+  const chooseSkin = (skinId: PixelSkinId) => {
+    socket?.emit("UPDATE_USER_APPEARANCE", { pixelCharacter: skinId });
+    onUpdated({ ...user, pixelCharacter: skinId });
+  };
   useEffect(() => {
     void api<{ localCompanion: { online: boolean }; mappings: Array<{ projectId: string; path?: string | null; version?: string | null }> }>("/api/users/me/settings").then((payload) => {
       setSettings((current) => ({ ...current, online: payload.localCompanion.online, version: payload.mappings.find((item) => item.version)?.version ?? undefined, mappings: Object.fromEntries(payload.mappings.filter((item) => item.path).map((item) => [item.projectId, item.path!])) }));
@@ -804,7 +808,21 @@ function UserSettingsModal({ projects, user, onClose }: { projects: ProjectItem[
   };
   return <Modal onClose={onClose} width="max-w-2xl"><ModalHeader icon={<UserRound size={16} />} title="Personal settings" description="Your Git identity and local companion stay private to this machine." onClose={onClose} />
     <div className="space-y-6 p-5 sm:p-6">
-      <section><div className="mb-2 text-[9px] font-semibold uppercase tracking-[.13em] text-zinc-400">Git identity</div><div className="rounded-xl border border-zinc-200 p-4"><div className="flex items-center gap-3"><div className="grid size-9 place-items-center rounded-full bg-zinc-950 text-white"><Github size={17} /></div><div><div className="text-[11px] font-semibold">@{user.username}</div><div className="mt-0.5 text-[9px] text-zinc-400">Commit identity comes from your local Git configuration</div></div><span className="ml-auto text-[9px] font-medium text-zinc-500">Kept local</span></div><div className="mt-3 flex items-center justify-between border-t border-zinc-100 pt-3 text-[9px] text-zinc-400"><span>Credentials never pass through the browser or activity logs.</span><button onClick={() => { setActiveUserId(""); window.location.reload(); }} className="font-medium text-zinc-700 hover:underline">Switch user</button></div></div></section>
+      <section>
+        <div className="mb-2 text-[9px] font-semibold uppercase tracking-[.13em] text-zinc-400">Chat character</div>
+        <div className="rounded-xl border border-zinc-200 p-4">
+          <p className="text-[9px] leading-4 text-zinc-500">Shown in the bottom-right crew overlay whenever you're the one running a request.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {PIXEL_SKINS.map((skin) => {
+              const selected = (user.pixelCharacter ?? PIXEL_SKINS[0]!.id) === skin.id;
+              return <button key={skin.id} type="button" onClick={() => chooseSkin(skin.id)} title={skin.label} className={cx("grid size-24 place-items-center rounded-xl border-2 bg-white transition", selected ? "border-zinc-900 shadow-sm" : "border-transparent hover:border-zinc-200")}>
+                <PixelAvatar skinId={skin.id} size={60} />
+              </button>;
+            })}
+          </div>
+        </div>
+      </section>
+      <section><div className="mb-2 text-[9px] font-semibold uppercase tracking-[.13em] text-zinc-400">Git identity</div><div className="rounded-xl border border-zinc-200 p-4"><div className="flex items-center gap-3"><div className="grid size-9 place-items-center rounded-full bg-zinc-950 text-white"><Github size={17} /></div><div><div className="text-[11px] font-semibold">@{user.username}</div><div className="mt-0.5 text-[9px] text-zinc-400">Commit identity comes from your local Git configuration</div></div><span className="ml-auto text-[9px] font-medium text-zinc-500">Kept local</span></div><div className="mt-3 flex items-center justify-between border-t border-zinc-100 pt-3 text-[9px] text-zinc-400"><span>Credentials never pass through the browser or activity logs.</span><button onClick={() => void logout()} className="font-medium text-red-600 hover:underline">Log out</button></div></div></section>
       <section><div className="mb-2 text-[9px] font-semibold uppercase tracking-[.13em] text-zinc-400">Local companion</div><div className="flex items-center gap-3 rounded-xl border border-zinc-200 p-4"><div className={cx("grid size-9 place-items-center rounded-xl", settings.online ? "bg-emerald-50 text-emerald-700" : "bg-zinc-100 text-zinc-500")}><Laptop2 size={17} /></div><div className="min-w-0 flex-1"><div className="flex items-center gap-2 text-[11px] font-semibold">This machine <span className={cx("size-1.5 rounded-full", settings.online ? "bg-emerald-500" : "bg-zinc-300")} /></div><div className="mt-0.5 text-[9px] text-zinc-400">{settings.online ? `Online${settings.version ? ` · companion v${settings.version}` : ""}` : "Companion not connected"}</div></div>{!settings.online && <a href={`${API_URL}/api/companion/download?platform=darwin`} className="rounded-lg bg-zinc-950 px-3 py-2 text-[9px] font-medium text-white">Download for macOS</a>}</div>{pairingCode && <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-[9px] text-emerald-900">Opening the companion… If it does not open, enter pairing code <strong className="ml-1 font-mono tracking-wider">{pairingCode}</strong>.</div>}{companionMessage && <p className="mt-2 text-[9px] text-amber-700">{companionMessage}</p>}</section>
       <section><div className="mb-2 flex items-center justify-between"><span className="text-[9px] font-semibold uppercase tracking-[.13em] text-zinc-400">Repositories on this machine</span><span className="text-[9px] text-zinc-400">No terminal required</span></div><div className="divide-y divide-zinc-100 rounded-xl border border-zinc-200 px-4">{projects.map((project) => <div key={project.id} className="flex items-center gap-3 py-3"><FolderGit2 size={15} className="text-zinc-400" /><div className="min-w-0 flex-1"><div className="text-[10px] font-semibold">{project.name}</div><div className="mt-1 truncate font-mono text-[9px] text-zinc-400">{settings.mappings[project.id] ?? `${project.repositoryOwner}/${project.repositoryName}`}</div></div>{settings.mappings[project.id] ? <span className="flex items-center gap-1 text-[9px] font-medium text-emerald-700"><Check size={11} /> Ready</span> : <button onClick={() => void connectProject(project)} className="rounded-lg border border-zinc-200 px-2.5 py-1.5 text-[9px] font-medium hover:bg-zinc-50">Clone or choose folder</button>}</div>)}</div></section>
     </div><div className="flex justify-end border-t border-zinc-100 px-6 py-4"><button onClick={onClose} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Done</button></div>

@@ -63,6 +63,12 @@ export async function loginWithUsername(username: string): Promise<string> {
   }
 }
 
+export async function logout(): Promise<void> {
+  await fetch(`${API_URL}/api/auth/logout`, { method: "POST", credentials: "include" }).catch(() => undefined);
+  setActiveUserId("");
+  window.location.reload();
+}
+
 export function beginGithubLogin(): void {
   const returnTo = `${window.location.pathname}${window.location.search}`;
   window.localStorage.setItem("relaycode.authReturnTo", returnTo);
