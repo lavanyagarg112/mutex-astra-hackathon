@@ -39,7 +39,7 @@ export type User = z.infer<typeof UserSchema>;
 
 export const UpdateUserAppearanceSchema = z.object({ pixelCharacter: PixelSkinIdSchema });
 export const MemberInteractionSchema = z.object({
-  projectId: z.string(), targetUserId: z.string(), kind: z.enum(["punch", "love", "excited"]),
+  projectId: z.string(), targetUserId: z.string(), kind: z.enum(["excited"]),
 });
 
 export const MessageSchema = z.object({
@@ -189,7 +189,7 @@ export interface ServerToClientEvents {
   DIFF_AVAILABLE: (payload: { projectId: string; taskId: string }) => void;
   PROCESS_STATUS_CHANGED: (payload: { projectId: string; userId: string }) => void;
   MEMBER_APPEARANCE_CHANGED: (payload: { projectId: string; userId: string; pixelCharacter: PixelSkinId }) => void;
-  MEMBER_INTERACTION: (payload: { projectId: string; fromUserId: string; targetUserId: string; kind: "punch" | "love" | "excited" }) => void;
+  MEMBER_INTERACTION: (payload: { projectId: string; fromUserId: string; targetUserId: string; kind: "excited" }) => void;
   ERROR: (payload: { message: string }) => void;
 }
 
