@@ -370,9 +370,21 @@ export class Scheduler {
       if (!claimed.count) continue;
       const refreshed = await this.prisma.task.findUniqueOrThrow({ where: { id: task.id }, include: fullTaskInclude });
       const refinements = refreshed.taskMessages.filter((link) => link.messageId !== refreshed.rootMessageId).map((link) => link.message.body);
+      const serializedProject = serializeProject(project);
+      // Companions released before executionMode existed still insist on a test
+      // command for every task. Give only those initialization dispatches a
+      // portable no-op command. New companions see executionMode and skip the
+      // validation stages entirely; the stored project settings are untouched.
+      const dispatchedProject = refreshed.executionMode === "INITIALIZATION"
+        ? {
+            ...serializedProject,
+            testCommand: `node -e "process.exit(0)"`,
+            toolPermissions: { ...serializedProject.toolPermissions as Record<string, boolean>, tests: true },
+          }
+        : serializedProject;
       const emitted = this.connections.emitToEligible(task.requestedByUserId, projectId, "START_TASK", {
         task: serializeTask(refreshed) as any,
-        project: serializeProject(project) as any,
+        project: dispatchedProject as any,
         request: refreshed.rootMessage.body,
         refinements,
         ...(project.agentCredential ? { agentCredential: project.agentCredential } : {}),
