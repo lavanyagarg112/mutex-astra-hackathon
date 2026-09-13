@@ -370,7 +370,7 @@ function Workspace() {
         <div className="max-w-md text-center">
           <div className="mx-auto grid size-12 place-items-center rounded-2xl bg-zinc-950 text-white"><FolderGit2 size={20} /></div>
           <h1 className="mt-5 text-2xl font-semibold tracking-tight">Create your first project</h1>
-          <p className="mt-2 text-sm leading-6 text-zinc-500">Choose a GitHub repository you can write to. Relaycode will create the shared request queue, then your Companion can clone it or connect an existing folder.</p>
+          <p className="mt-2 text-sm leading-6 text-zinc-500">Choose a GitHub repository you can write to. Mutex will create the shared request queue, then your Companion can clone it or connect an existing folder.</p>
           <button onClick={() => setModal("createProject")} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-3 text-xs font-medium text-white"><Plus size={14} /> Create project</button>
         </div>
       </main>
@@ -462,8 +462,8 @@ function LoginScreen() {
   return <div className="grid min-h-screen place-items-center bg-[#f4f4f2] p-5">
     <div className="enter-up w-full max-w-[420px] overflow-hidden rounded-[24px] border border-zinc-200 bg-white shadow-float">
       <div className="border-b border-zinc-100 px-7 pb-7 pt-8">
-        <div className="grid size-11 place-items-center rounded-[14px] bg-zinc-950 text-white"><Zap size={18} fill="currentColor" /></div>
-        <h1 className="mt-6 text-[28px] font-semibold tracking-[-0.045em]">Welcome to Relaycode</h1>
+        <img src="/brand/mutex-mark-navy.png" alt="Mutex" className="size-11 rounded-[14px] object-cover" />
+        <h1 className="mt-6 text-[28px] font-semibold tracking-[-0.045em]">Welcome to Mutex</h1>
         <p className="mt-2 text-[12px] leading-5 text-zinc-500">Sign in to collaborate on repositories your GitHub account can access.</p>
       </div>
       <div className="px-7 py-7">
@@ -481,14 +481,14 @@ function ProjectSidebar({ projects, user, companion, selectedId, open, collapsed
       <div className="relative flex items-center justify-between px-2 py-2.5">
         <div className="flex items-center gap-2.5">
           <button
-            aria-label={collapsed ? "Expand project navigation" : "Relaycode"}
-            title={collapsed ? "Expand sidebar" : undefined}
-            onClick={collapsed ? onToggleCollapsed : undefined}
-            className={cx("grid size-8 place-items-center rounded-[10px] bg-zinc-950 text-white", collapsed && "cursor-pointer transition hover:bg-zinc-800")}
+            aria-label="Expand project navigation"
+            title="Expand sidebar"
+            onClick={onToggleCollapsed}
+            className={cx("hidden size-8 shrink-0 place-items-center overflow-hidden rounded-[10px] transition hover:opacity-80", collapsed && "lg:grid")}
           >
-            <Zap size={15} fill="currentColor" />
+            <img src="/brand/mutex-mark-navy.png" alt="Mutex" className="size-full object-cover" />
           </button>
-          <span className={cx("text-[15px] font-semibold tracking-[-0.02em]", collapsed && "lg:hidden")}>Relaycode</span>
+          <img src="/brand/mutex-wordmark.png" alt="Mutex" className={cx("h-5 w-auto shrink-0 [mix-blend-mode:multiply]", collapsed && "lg:hidden")} />
         </div>
         <button aria-label="Close navigation" className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-200 lg:hidden" onClick={onClose}><X size={17} /></button>
         {!collapsed && <button aria-label="Collapse project navigation" title="Collapse sidebar" className="hidden rounded-lg p-1.5 text-zinc-400 transition hover:bg-zinc-200 hover:text-zinc-700 lg:block" onClick={onToggleCollapsed}><ChevronRight size={14} className="rotate-180" /></button>}
@@ -506,11 +506,7 @@ function ProjectSidebar({ projects, user, companion, selectedId, open, collapsed
               <span className="truncate text-[12px] font-medium">{project.name}</span>
               {project.lastMessage && <span className="shrink-0 text-[9px] text-zinc-400">{when(project.lastMessage.createdAt)}</span>}
             </div>
-            <div className="mt-0.5 flex items-center gap-1 text-[10px] text-zinc-400">
-              <UsersRound size={10} className="shrink-0" />
-              <span className="shrink-0">{project.memberCount ?? project.members.length}</span>
-              {project.lastMessage && <span className="truncate">· {project.lastMessage.authorName}: {project.lastMessage.body}</span>}
-            </div>
+            {project.lastMessage && <div className="mt-0.5 truncate text-[10px] text-zinc-400">{project.lastMessage.authorName}: {project.lastMessage.body}</div>}
           </div>
           {project.onlineCount > 0 && <span className={cx("flex items-center gap-1 text-[9px] text-zinc-400", collapsed && "lg:absolute lg:bottom-1.5 lg:right-1.5")}><span className="size-1.5 rounded-full bg-emerald-500" /><span className={cx(collapsed && "lg:hidden")}>{project.onlineCount}</span></span>}
         </button>)}
@@ -655,7 +651,6 @@ function TeamMessage({ message, currentUser }: { message: Message; currentUser: 
       <div className={cx("inline-block rounded-2xl px-3.5 py-2.5 text-left text-[13px] leading-5", mine ? "rounded-tr-md bg-zinc-900 text-white" : "rounded-tl-md bg-zinc-100 text-zinc-800")}>
         {message.body}
       </div>
-      <div className="mt-1 text-[9px] text-zinc-400">Team message · not shared with the agent</div>
     </div>
   </div>;
 }
@@ -697,7 +692,7 @@ const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: U
     const agentMatch = AGENT_TRIGGER.exec(raw);
     const text = agentMatch ? raw.slice(agentMatch[0].length).trim() : raw;
     try {
-      if (serverMode !== "live") throw new Error("Relaycode is reconnecting. Try again in a moment.");
+      if (serverMode !== "live") throw new Error("Mutex is reconnecting. Try again in a moment.");
       if (!replyTask && !agentMatch) {
         const created = await api<Message>(`/api/projects/${project.id}/messages`, { method: "POST", body: JSON.stringify({ body: text }) });
         onMessageCreated(created);
@@ -707,7 +702,7 @@ const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: U
         if ("kind" in created) onAttached(created);
         else onCreated(created);
       }
-      setBody(""); onCancelReply();
+      setBody(!replyTask && agentMatch ? "/agent " : ""); onCancelReply();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not send your message.");
     } finally { setSending(false); }
@@ -1014,8 +1009,8 @@ function CreateProjectModal({ user, onClose, onCreated }: { user: User; onClose:
       <Field label="Project name"><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Payments dashboard" className={fieldClass} /></Field>
       {manualEntry && <Field label="GitHub repository URL" hint="Validated when the project is created"><input value={repositoryUrl} onChange={(event) => setRepositoryUrl(event.target.value)} placeholder="https://github.com/owner/repository.git" className={cx(fieldClass, "font-mono")} /></Field>}
       <Field label="Branch"><div className="relative"><GitBranch size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={branch} onChange={(event) => setBranch(event.target.value)} className={cx(fieldClass, "pl-9 font-mono")} /></div></Field>
-      <div className="flex gap-2 rounded-xl border border-blue-100 bg-blue-50/60 p-3 text-[9px] leading-4 text-blue-900"><RefreshCw size={13} className="mt-0.5 shrink-0" /><span>Relaycode will inspect this branch and detect its install, frontend, backend, and validation commands. You can review or change them in Project Settings.</span></div>
-      <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-[9px] leading-4 text-zinc-500">You become the project owner. Relaycode verifies repository access before adding members or running requests.</div>
+      <div className="flex gap-2 rounded-xl border border-blue-100 bg-blue-50/60 p-3 text-[9px] leading-4 text-blue-900"><RefreshCw size={13} className="mt-0.5 shrink-0" /><span>Mutex will inspect this branch and detect its install, frontend, backend, and validation commands. You can review or change them in Project Settings.</span></div>
+      <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-[9px] leading-4 text-zinc-500">You become the project owner. Mutex verifies repository access before adding members or running requests.</div>
       {error && <p className="text-[10px] text-red-600">{error}</p>}
     </div><div className="flex items-center justify-between border-t border-zinc-100 px-5 py-4 sm:px-6"><span className="text-[9px] text-zinc-400">Creating as @{user.username}</span><div className="flex gap-2"><button type="button" onClick={onClose} className="rounded-xl px-4 py-2.5 text-[10px] font-medium text-zinc-500">Cancel</button><button disabled={saving || !name.trim() || !repositoryUrl.trim() || !branch.trim()} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white disabled:bg-zinc-300">{saving ? "Detecting & creating…" : "Create project"}</button></div></div></form>
   </Modal>;
@@ -1070,7 +1065,7 @@ function ProjectSettingsModal({ project, onClose, onInitialize, onSave }: { proj
       {tab === "agent" && <div className="space-y-5"><div className="grid gap-4 sm:grid-cols-2"><Field label="Coordinator model" hint="Classifies active-task refinements"><select value={draft.coordinatorModel.startsWith("gpt-") ? draft.coordinatorModel : "gpt-5-mini"} onChange={(event) => setDraft({ ...draft, coordinatorModel: event.target.value })} className={fieldClass}><option value="gpt-5-mini">GPT-5 mini</option><option value="gpt-5">GPT-5</option><option value="gpt-4.1-mini">GPT-4.1 mini</option></select></Field><Field label="Developer model" hint="Runs locally"><select value={draft.developerModel} onChange={(event) => setDraft({ ...draft, developerModel: event.target.value })} className={fieldClass}><option value="gpt-5.6-sol">GPT-5.6 Sol (OpenAI)</option><option value="local-agent">OpenAI agent (default model)</option><option value="command">Local command agent</option><option value="demo">Demo only (placeholder change)</option></select></Field></div>{!["demo", "command"].includes(draft.developerModel) && !project.agentCredentialConfigured && !agentCredential && <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-[10px] leading-4 text-red-700"><AlertTriangle size={14} className="mt-0.5 shrink-0" /><span><strong>OpenAI key required.</strong> Coding requests cannot start until a project owner saves the shared key below.</span></div>}<Field label={project.agentCredentialConfigured ? "Replace shared OpenAI key (optional)" : "Shared OpenAI key"} hint="Used by both the coordinator and local developer agent"><input type="password" autoComplete="off" value={agentCredential} disabled={clearAgentCredential} onChange={(event) => setAgentCredential(event.target.value)} placeholder={project.agentCredentialConfigured ? "••••••••••••••••  (configured)" : "sk-…"} className={fieldClass} /></Field><div className="flex items-center justify-between rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5"><div><div className="text-[10px] font-medium text-zinc-700">{project.agentCredentialConfigured && !clearAgentCredential ? "Shared key configured" : "No shared key configured"}</div><div className="mt-0.5 text-[9px] text-zinc-400">The key is never returned to browsers or written to activity logs.</div></div>{project.agentCredentialConfigured && <button type="button" onClick={() => { setClearAgentCredential((value) => !value); setAgentCredential(""); }} className={cx("rounded-lg px-3 py-1.5 text-[9px] font-medium", clearAgentCredential ? "bg-red-600 text-white" : "border border-zinc-200 bg-white text-red-600")}>{clearAgentCredential ? "Will remove on save" : "Remove key"}</button>}</div><div><div className="text-[10px] font-semibold text-zinc-700">Tool permissions</div><div className="mt-2 divide-y divide-zinc-100 rounded-xl border border-zinc-200 px-3">{Object.entries(permissions).map(([name, enabled]) => <label key={name} className="flex items-center py-2.5 text-[10px]"><span className="text-zinc-600">{name}</span><button type="button" aria-pressed={enabled} onClick={() => setPermissions({ ...permissions, [name]: !enabled })} className={cx("ml-auto h-5 w-9 rounded-full p-0.5 transition", enabled ? "bg-zinc-900" : "bg-zinc-200")}><span className={cx("block size-4 rounded-full bg-white shadow-sm transition-transform", enabled && "translate-x-4")} /></button></label>)}</div></div></div>}
       {tab === "commands" && <div className="space-y-4">
         <div className="flex items-center justify-between gap-4 rounded-xl border border-zinc-900 bg-zinc-950 p-4 text-white"><div><div className="flex items-center gap-2 text-[11px] font-semibold"><Zap size={13} fill="currentColor" /> Initialize or complete setup</div><p className="mt-1 text-[9px] leading-4 text-zinc-400">Works for new repositories and existing websites whose run or validation commands are missing. Existing application code is preserved.</p></div><button type="button" onClick={onInitialize} className="shrink-0 rounded-lg bg-white px-3 py-2 text-[9px] font-semibold text-zinc-950 hover:bg-zinc-100">Choose stack</button></div>
-        <div className="flex items-start justify-between gap-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3"><p className="text-[10px] leading-4 text-zinc-500">Relaycode inspects manifests, README instructions, workspace files, Makefiles, environment examples, and CI configuration. When a shared OpenAI key is configured, the project agent selects the best repository-grounded commands. Every result remains editable.</p><button type="button" disabled={detectingCommands} onClick={() => void detectCommands()} className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[9px] font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:text-zinc-300"><RefreshCw size={11} className={detectingCommands ? "animate-spin" : ""} />{detectingCommands ? "Agent inspecting…" : "Infer again"}</button></div>
+        <div className="flex items-start justify-between gap-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3"><p className="text-[10px] leading-4 text-zinc-500">Mutex inspects manifests, README instructions, workspace files, Makefiles, environment examples, and CI configuration. When a shared OpenAI key is configured, the project agent selects the best repository-grounded commands. Every result remains editable.</p><button type="button" disabled={detectingCommands} onClick={() => void detectCommands()} className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[9px] font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:text-zinc-300"><RefreshCw size={11} className={detectingCommands ? "animate-spin" : ""} />{detectingCommands ? "Agent inspecting…" : "Infer again"}</button></div>
         {commandDetectionMessage && <p className={cx("rounded-lg px-3 py-2 text-[9px] leading-4", commandDetectionFailed ? "bg-red-50 text-red-700" : "bg-emerald-50 text-emerald-700")}>{commandDetectionMessage}</p>}
         {(["installCommand", "frontendCommand", "backendCommand", "testCommand"] as const).map((key) => <Field key={key} label={key.replace("Command", " command").replace(/^./, (character) => character.toUpperCase())} hint={key === "testCommand" ? "Must succeed before a push" : undefined}><div className="relative"><TerminalSquare size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft[key] ?? ""} onChange={(event) => setDraft({ ...draft, [key]: event.target.value || null })} placeholder={key === "installCommand" ? "npm install" : key === "frontendCommand" ? "npm run dev" : key === "backendCommand" ? "npm run server" : "npm test"} className={cx(fieldClass, "pl-9 font-mono")} /></div></Field>)}
       </div>}
@@ -1104,10 +1099,10 @@ function InitializeRepositoryModal({ project, onClose, onStarted }: { project: P
     }
   };
   return <Modal onClose={onClose} width="max-w-lg">
-    <ModalHeader icon={<Zap size={16} />} title="Initialize or complete setup" description="Choose the stack. Relaycode preserves an existing site and fills in missing setup commands." onClose={onClose} />
+    <ModalHeader icon={<Zap size={16} />} title="Initialize or complete setup" description="Choose the stack. Mutex preserves an existing site and fills in missing setup commands." onClose={onClose} />
     <form onSubmit={submit}>
       <div className="space-y-4 p-5 sm:p-6">
-        <div className="flex gap-2 rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-[9px] leading-4 text-blue-900"><ShieldCheck size={13} className="mt-0.5 shrink-0" /><span>This setup run does not require or run a pre-existing validation command. Relaycode inspects and preserves an existing application, fills in missing setup, then saves the detected install, preview, and validation commands.</span></div>
+        <div className="flex gap-2 rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-[9px] leading-4 text-blue-900"><ShieldCheck size={13} className="mt-0.5 shrink-0" /><span>This setup run does not require or run a pre-existing validation command. Mutex inspects and preserves an existing application, fills in missing setup, then saves the detected install, preview, and validation commands.</span></div>
         <Field label="Frontend"><select autoFocus value={frontend} onChange={(event) => setFrontend(event.target.value as RepositoryFrontend)} className={fieldClass}><option value="REACT">React</option><option value="NEXT_JS">Next.js</option><option value="VUE">Vue</option><option value="SVELTE">Svelte</option><option value="NONE">No frontend</option></select></Field>
         <Field label="Backend"><select value={backend} onChange={(event) => setBackend(event.target.value as RepositoryBackend)} className={fieldClass}><option value="EXPRESS">Express</option><option value="FASTIFY">Fastify</option><option value="NEST_JS">NestJS</option><option value="FASTAPI">FastAPI</option><option value="DJANGO">Django</option><option value="NONE">No backend</option></select></Field>
         <Field label="Database"><select value={database} onChange={(event) => setDatabase(event.target.value as RepositoryDatabase)} className={fieldClass}><option value="POSTGRESQL">PostgreSQL</option><option value="MYSQL">MySQL</option><option value="SQLITE">SQLite</option><option value="MONGODB">MongoDB</option><option value="NONE">No database</option></select></Field>
@@ -1142,7 +1137,7 @@ function UserSettingsModal({ projects, user, socket, onClose, onUpdated }: { pro
       setPairingCode(result.code);
       window.location.assign(companionDeepLink(result.code));
     } catch {
-      setCompanionMessage("Install or open Relaycode Companion, then try again.");
+      setCompanionMessage("Install or open Mutex Companion, then try again.");
     }
   };
   return <Modal onClose={onClose} width="max-w-2xl"><ModalHeader icon={<UserRound size={16} />} title="Personal settings" description="Your Git identity and local companion stay private to this machine." onClose={onClose} />
@@ -1182,8 +1177,8 @@ function JoinProjectStatus({ state, onClose, onRetry }: { state: JoinState; onCl
     <div className="p-7 text-center">
       <div className={cx("mx-auto grid size-11 place-items-center rounded-xl", joining ? "bg-zinc-100 text-zinc-600" : readOnly ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-600")}>{joining ? <LoaderCircle size={19} className="animate-spin" /> : readOnly ? <Eye size={19} /> : <AlertTriangle size={19} />}</div>
       <h3 className="mt-4 text-[16px] font-semibold tracking-tight">{joining ? "Verifying repository access" : readOnly ? "Joined with read-only access" : "Couldn’t join this project"}</h3>
-      <p className="mx-auto mt-2 max-w-sm text-[11px] leading-5 text-zinc-500">{joining ? "Relaycode is checking that your GitHub account has access to this repository." : state.message ?? "Relaycode could not verify access to the project repository."}</p>
-      {state.status === "error" && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-left text-[10px] leading-4 text-amber-900"><strong>Already a collaborator?</strong> Reconnect GitHub so Relaycode receives the repository permission, then retry this invite. For an organization repository, you may also need to authorize the organization’s SSO.</div>}
+      <p className="mx-auto mt-2 max-w-sm text-[11px] leading-5 text-zinc-500">{joining ? "Mutex is checking that your GitHub account has access to this repository." : state.message ?? "Mutex could not verify access to the project repository."}</p>
+      {state.status === "error" && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-left text-[10px] leading-4 text-amber-900"><strong>Already a collaborator?</strong> Reconnect GitHub so Mutex receives the repository permission, then retry this invite. For an organization repository, you may also need to authorize the organization’s SSO.</div>}
       {state.status === "error" && <div className="mt-5 flex flex-wrap justify-center gap-2"><button onClick={onClose} className="rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-600">Back to projects</button><button onClick={onRetry} className="rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-700"><RefreshCw size={12} className="mr-1.5 inline" />Try again</button><button onClick={beginGithubLogin} className="flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white"><Github size={13} /> Reconnect GitHub</button></div>}
       {readOnly && <div className="mt-5 flex justify-center gap-2"><button onClick={beginGithubLogin} className="flex items-center gap-2 rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-700"><Github size={13} /> Reconnect GitHub</button><button onClick={onClose} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Continue read-only</button></div>}
     </div>
@@ -1192,7 +1187,7 @@ function JoinProjectStatus({ state, onClose, onRetry }: { state: JoinState; onCl
 
 function CompanionConnectStatus({ state, onClose }: { state: PairingState; onClose: () => void }) {
   const code = state.code;
-  return <Modal onClose={state.status === "pairing" ? () => undefined : onClose} width="max-w-md"><div className="p-7 text-center"><div className={cx("mx-auto grid size-11 place-items-center rounded-xl", state.status === "error" ? "bg-red-50 text-red-600" : "bg-zinc-100 text-zinc-700")}>{state.status === "pairing" ? <LoaderCircle size={19} className="animate-spin" /> : state.status === "ready" ? <Laptop2 size={19} /> : <AlertTriangle size={19} />}</div><h3 className="mt-4 text-[16px] font-semibold tracking-tight">{state.status === "pairing" ? "Creating a secure connection" : state.status === "ready" ? "Finish in Relaycode Companion" : "Companion pairing failed"}</h3><p className="mx-auto mt-2 max-w-sm text-[11px] leading-5 text-zinc-500">{state.status === "pairing" ? "This only takes a moment." : state.status === "ready" ? "The desktop app should open automatically. If it does not, enter the code below in the companion." : state.message}</p>{code && <button onClick={() => void navigator.clipboard?.writeText(code)} className="mx-auto mt-5 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 font-mono text-[14px] font-semibold tracking-[.18em]"><Copy size={13} className="text-zinc-400" />{code}</button>}<button onClick={onClose} className="mt-5 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Back to Relaycode</button></div></Modal>;
+  return <Modal onClose={state.status === "pairing" ? () => undefined : onClose} width="max-w-md"><div className="p-7 text-center"><div className={cx("mx-auto grid size-11 place-items-center rounded-xl", state.status === "error" ? "bg-red-50 text-red-600" : "bg-zinc-100 text-zinc-700")}>{state.status === "pairing" ? <LoaderCircle size={19} className="animate-spin" /> : state.status === "ready" ? <Laptop2 size={19} /> : <AlertTriangle size={19} />}</div><h3 className="mt-4 text-[16px] font-semibold tracking-tight">{state.status === "pairing" ? "Creating a secure connection" : state.status === "ready" ? "Finish in Mutex Companion" : "Companion pairing failed"}</h3><p className="mx-auto mt-2 max-w-sm text-[11px] leading-5 text-zinc-500">{state.status === "pairing" ? "This only takes a moment." : state.status === "ready" ? "The desktop app should open automatically. If it does not, enter the code below in the companion." : state.message}</p>{code && <button onClick={() => void navigator.clipboard?.writeText(code)} className="mx-auto mt-5 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 font-mono text-[14px] font-semibold tracking-[.18em]"><Copy size={13} className="text-zinc-400" />{code}</button>}<button onClick={onClose} className="mt-5 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Back to Mutex</button></div></Modal>;
 }
 
 function CancelModal({ task, onClose, onConfirm }: { task: Task; onClose: () => void; onConfirm: () => void }) {

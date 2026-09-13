@@ -1,6 +1,6 @@
-# Relaycode
+# Mutex
 
-Relaycode is a collaborative request queue for AI-assisted software development. The browser coordinates people, explicit queue order, task state, diffs, and activity. A small companion runs on each developer's computer and is the only component allowed to touch their repository, use their Git credential, or run the developer agent.
+Mutex is a collaborative request queue for AI-assisted software development. The browser coordinates people, explicit queue order, task state, diffs, and activity. A small companion runs on each developer's computer and is the only component allowed to touch their repository, use their Git credential, or run the developer agent.
 
 This repository contains a working hackathon MVP—not only a prototype screen. It includes the web app, real-time server, PostgreSQL schema and seed data, deterministic scheduler, local companion, real Git synchronization/commit/push/rollback operations, and an OpenAI/command/demo agent abstraction.
 
@@ -67,14 +67,14 @@ The server listens on `http://localhost:4100`. `GET /health` is the readiness ch
 
 ## Connect the desktop companion
 
-For normal use, contributors do **not** clone this Relaycode repository or configure a daemon in a terminal. Publish the companion once, then each contributor:
+For normal use, contributors do **not** clone this Mutex repository or configure a daemon in a terminal. Publish the companion once, then each contributor:
 
-1. Signs in to Relaycode with GitHub.
-2. Opens **Personal settings**, downloads Relaycode Companion for macOS, Windows, or Linux, and installs it.
-3. Returns to Relaycode and chooses **Connect companion**. The browser opens the desktop app and passes a one-time pairing code.
+1. Signs in to Mutex with GitHub.
+2. Opens **Personal settings**, downloads Mutex Companion for macOS, Windows, or Linux, and installs it.
+3. Returns to Mutex and chooses **Connect companion**. The browser opens the desktop app and passes a one-time pairing code.
 4. In the desktop app, chooses **Clone repository** or **Use existing folder** for each project.
 
-The Companion keeps its pairing token and GitHub credential only in that operating-system user account. It clones the project repository itself; it never asks the user to clone Relaycode. Build each native distributable with:
+The Companion keeps its pairing token and GitHub credential only in that operating-system user account. It clones the project repository itself; it never asks the user to clone Mutex. Build each native distributable with:
 
 ```bash
 npm run package:mac -w @relaycode/companion
@@ -84,13 +84,13 @@ npm run package:linux -w @relaycode/companion
 
 The GitHub Actions workflow **Companion installers** builds all three operating-system packages. Run it manually or push a version tag, download its artifacts, and attach them to a GitHub Release. macOS produces a universal DMG/ZIP, Windows produces an NSIS installer/ZIP, and Linux produces AppImage/DEB packages.
 
-For local development, run `npm run dev -w @relaycode/companion`. On macOS this creates and launches an unpacked `Relaycode Companion.app` with the real `relaycode://` registration; launching the generic Electron binary cannot receive website deep links correctly.
+For local development, run `npm run dev -w @relaycode/companion`. On macOS this creates and launches an unpacked `Mutex Companion.app` with the real `relaycode://` registration; launching the generic Electron binary cannot receive website deep links correctly.
 
-When an owner creates a project, Relaycode inspects the configured GitHub branch and pre-fills the install, frontend, backend, and validation commands from repository conventions. Owners can review or edit every value under **Project settings → Commands**, or use **Infer again** after the repository changes. With the shared OpenAI key configured, the project agent interprets manifests, README instructions, CI workflows, Makefiles, Docker Compose, environment examples, and workspace configuration, then selects only commands grounded in those files; unsafe or ungrounded suggestions are rejected. Detection supports common npm/pnpm/yarn/Bun monorepos, Python/FastAPI/Django/pytest projects, Go, and Rust, and gracefully falls back to deterministic detection.
+When an owner creates a project, Mutex inspects the configured GitHub branch and pre-fills the install, frontend, backend, and validation commands from repository conventions. Owners can review or edit every value under **Project settings → Commands**, or use **Infer again** after the repository changes. With the shared OpenAI key configured, the project agent interprets manifests, README instructions, CI workflows, Makefiles, Docker Compose, environment examples, and workspace configuration, then selects only commands grounded in those files; unsafe or ungrounded suggestions are rejected. Detection supports common npm/pnpm/yarn/Bun monorepos, Python/FastAPI/Django/pytest projects, Go, and Rust, and gracefully falls back to deterministic detection.
 
 The preview Play control runs the inferred install command to completion, retries it once on failure, and starts the backend and frontend only after installation succeeds. The companion reports the actual local development URL to the signed-in user's browser, which embeds it in the preview panel and always provides an external **Open** link for sites that disallow iframes.
 
-Required validation commands retry once immediately after a non-zero exit. Relaycode advances only if the retry succeeds; if it also fails after agent work, the existing repair loop receives the failure output, updates the implementation, and validates again before any push.
+Required validation commands retry once immediately after a non-zero exit. Mutex advances only if the retry succeeds; if it also fails after agent work, the existing repair loop receives the failure output, updates the implementation, and validates again before any push.
 
 Upload the installers to a release host and set `COMPANION_DOWNLOAD_URL_MAC`, `COMPANION_DOWNLOAD_URL_WINDOWS`, and `COMPANION_DOWNLOAD_URL_LINUX` to their public URLs. Personal Settings detects the visitor’s operating system while keeping all three downloads available. The legacy CLI flow below remains useful for local development and CI.
 
@@ -121,7 +121,7 @@ RELAYCODE_DAEMON_TOKEN=alice-daemon-token \
 npm run dev -w @relaycode/daemon
 ```
 
-In Relaycode, open **Project settings → Agent**. A project owner enters the shared OpenAI key once and selects the developer model. The server stores the credential but never returns it to browsers or activity feeds; it is delivered only to the daemon assigned the current task. Git credentials remain local to each developer.
+In Mutex, open **Project settings → Agent**. A project owner enters the shared OpenAI key once and selects the developer model. The server stores the credential but never returns it to browsers or activity feeds; it is delivered only to the daemon assigned the current task. Git credentials remain local to each developer.
 
 Run Bob's companion in another terminal with `bob` and `bob-daemon-token`. Each user needs their own repository copy and local mapping. On first connection or reconnection, the companion synchronizes before it becomes eligible to execute tasks.
 
@@ -163,20 +163,20 @@ Protected branches may reject this operation; the application reports that failu
 
 ## Deploy to Render
 
-Relaycode is deployable as one Docker web service plus PostgreSQL; the production server serves the built web app from the same origin. `render.yaml` provisions both.
+Mutex is deployable as one Docker web service plus PostgreSQL; the production server serves the built web app from the same origin. `render.yaml` provisions both.
 
 1. Push this repository to a GitHub repository you control and create a Render Blueprint from it.
 2. In GitHub, create an OAuth App. Its authorization callback must be exactly:
 
    ```text
-   https://YOUR-RELAYCODE-DOMAIN/api/auth/github/callback
+   https://YOUR-MUTEX-DOMAIN/api/auth/github/callback
    ```
 
    Add `read:user repo` as the OAuth scope (`GITHUB_OAUTH_SCOPE`). `repo` is needed to list private repositories and verify write access.
-3. In Render, set the Blueprint's `PUBLIC_URL` and `WEB_ORIGIN` to `https://YOUR-RELAYCODE-DOMAIN`, then add the GitHub client ID, client secret, callback URL, and scope. Keep `ALLOW_DEMO_AUTH=false`.
+3. In Render, set the Blueprint's `PUBLIC_URL` and `WEB_ORIGIN` to `https://YOUR-MUTEX-DOMAIN`, then add the GitHub client ID, client secret, callback URL, and scope. Keep `ALLOW_DEMO_AUTH=false`.
 4. Run **Companion installers** in GitHub Actions, publish its macOS, Windows, and Linux artifacts, then set the three `COMPANION_DOWNLOAD_URL_*` values. People can now sign in, join only repositories their GitHub account can write to, and pair their local Companion without a terminal.
 
-There is no universal “Sign in with ChatGPT” authentication flow used here. GitHub OAuth is the right identity source because it also provides the repository authorization check Relaycode needs.
+There is no universal “Sign in with ChatGPT” authentication flow used here. GitHub OAuth is the right identity source because it also provides the repository authorization check Mutex needs.
 
 ## Useful commands
 
