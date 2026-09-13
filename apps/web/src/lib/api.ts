@@ -77,28 +77,6 @@ export function connectSocket(): Socket<ServerToClientEvents, ClientToServerEven
   });
 }
 
-export async function loginWithUsername(username: string): Promise<string> {
-  const normalized = username.trim().toLowerCase();
-  try {
-    const response = await fetch(`${API_URL}/api/auth/login`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ username: normalized }),
-    });
-    if (!response.ok) throw new Error("Unknown username");
-    const payload = await response.json() as { user: { id: string } };
-    setActiveUserId(payload.user.id);
-    return payload.user.id;
-  } catch (error) {
-    if (["alice", "bob", "charlie"].includes(normalized)) {
-      setActiveUserId(normalized);
-      return normalized;
-    }
-    throw error;
-  }
-}
-
 export async function logout(): Promise<void> {
   await fetch(`${API_URL}/api/auth/logout`, { method: "POST", credentials: "include" }).catch(() => undefined);
   setActiveUserId("");

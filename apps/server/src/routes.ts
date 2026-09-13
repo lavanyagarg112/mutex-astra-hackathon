@@ -83,10 +83,19 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
       const user = await prisma.user.findUnique({ where: { id: req.userId! } });
       if (!user) return res.status(401).json({ error: "Unknown user" });
       const memberships = await prisma.projectMember.findMany({ where: { userId: user.id }, include: { project: true }, orderBy: { createdAt: "asc" } });
-      return res.json({
-        user: serializeUser(user),
-        projects: memberships.map(({ project, role, repositoryWrite }) => ({ ...serializeProject(project), membership: { role, repositoryWrite } })),
-      });
+      const projects = await Promise.all(memberships.map(async ({ project, role, repositoryWrite }) => {
+        const [memberCount, lastMessage] = await Promise.all([
+          prisma.projectMember.count({ where: { projectId: project.id } }),
+          prisma.message.findFirst({ where: { projectId: project.id }, orderBy: { createdAt: "desc" }, include: { author: true } }),
+        ]);
+        return {
+          ...serializeProject(project),
+          membership: { role, repositoryWrite },
+          memberCount,
+          lastMessage: lastMessage ? { body: lastMessage.body, createdAt: lastMessage.createdAt.toISOString(), authorName: lastMessage.author.name } : null,
+        };
+      }));
+      return res.json({ user: serializeUser(user), projects });
     } catch (error) { return routeError(res, error); }
   });
 
