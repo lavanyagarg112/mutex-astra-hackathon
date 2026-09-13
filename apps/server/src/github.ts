@@ -35,10 +35,28 @@ async function githubFetch<T>(path: string, token: string, init?: RequestInit): 
     headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28", ...init?.headers },
   });
   if (response.status === 401) throw new HttpError(401, "Your GitHub authorization has expired. Sign in with GitHub again.");
-  if (response.status === 403) throw new HttpError(403, "GitHub denied this request. Check the Relaycode GitHub App repository permissions.");
-  if (response.status === 404) throw new HttpError(403, "Your GitHub account does not have access to this repository.");
+  if (response.status === 403 || response.status === 404) throw githubAuthorizationError(response, path);
   if (!response.ok) throw new HttpError(502, `GitHub API request failed (${response.status})`);
   return response.json() as Promise<T>;
+}
+
+function githubAuthorizationError(response: Response, path: string) {
+  const sso = response.headers.get("x-github-sso") ?? "";
+  if (/\brequired\b/i.test(sso)) {
+    return new HttpError(403, "Your organization requires SSO authorization. Open your GitHub application settings, authorize Relaycode for this organization, then try again.");
+  }
+
+  const grantedScopes = response.headers.get("x-oauth-scopes");
+  const scopes = grantedScopes?.split(",").map((scope) => scope.trim().toLowerCase()).filter(Boolean) ?? [];
+  const repositoryRequest = /^\/repos\//.test(path);
+  if (repositoryRequest && response.status === 404 && grantedScopes !== null && !scopes.includes("repo")) {
+    return new HttpError(403, "Relaycode's GitHub authorization cannot read repositories. Sign out, reconnect GitHub, and approve repository access (OAuth scope: repo), then try again.");
+  }
+
+  if (response.status === 404 && repositoryRequest) {
+    return new HttpError(403, "GitHub could not expose this repository to Relaycode. Confirm that this GitHub account can open the repository and, for an organization repository, that OAuth app access and SSO are authorized, then reconnect GitHub.");
+  }
+  return new HttpError(403, "GitHub denied this request. Reconnect GitHub with repository access and authorize organization SSO if your organization requires it.");
 }
 
 export async function exchangeOAuthCode(code: string) {

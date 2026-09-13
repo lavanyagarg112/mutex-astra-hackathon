@@ -10,6 +10,14 @@ export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
 export const TaskTypeSchema = z.enum(["NORMAL", "REFINEMENT"]);
 export type TaskType = z.infer<typeof TaskTypeSchema>;
+export const TaskExecutionModeSchema = z.enum(["NORMAL", "INITIALIZATION"]);
+export type TaskExecutionMode = z.infer<typeof TaskExecutionModeSchema>;
+export const RepositoryInitializationSchema = z.object({
+  frontend: z.enum(["REACT", "NEXT_JS", "VUE", "SVELTE", "NONE"]),
+  backend: z.enum(["EXPRESS", "FASTIFY", "NEST_JS", "FASTAPI", "DJANGO", "NONE"]),
+  database: z.enum(["POSTGRESQL", "MYSQL", "SQLITE", "MONGODB", "NONE"]),
+});
+export type RepositoryInitialization = z.infer<typeof RepositoryInitializationSchema>;
 export const TaskPhaseSchema = z.enum(["SYNCING", "PLANNING", "EDITING", "VALIDATING", "PUSHING", "PAUSED"]);
 
 // Ids only — the actual pixel-grid art for each skin lives client-side
@@ -49,6 +57,7 @@ export type StoredDiff = z.infer<typeof StoredDiffSchema>;
 export const TaskSchema = z.object({
   id: z.string(), number: z.number(), projectId: z.string(), rootMessageId: z.string(), parentTaskId: z.string().nullable(),
   type: TaskTypeSchema, status: TaskStatusSchema, queuePriority: z.number(), queueSequence: z.number(),
+  executionMode: TaskExecutionModeSchema.default("NORMAL"), initializationConfig: RepositoryInitializationSchema.nullable().optional(),
   requestedByUserId: z.string(), executorUserId: z.string().nullable(), baseCommitSha: z.string().nullable(),
   commitSha: z.string().nullable(), amendable: z.boolean(), shortStatus: z.string().nullable(), diff: StoredDiffSchema.nullable().optional(),
   failureReason: z.string().nullable().optional(),
@@ -74,6 +83,16 @@ export const ActivitySchema = z.object({
 export type Activity = z.infer<typeof ActivitySchema>;
 
 export const CreateRequestSchema = z.object({ projectId: z.string(), body: z.string().trim().min(2).max(10_000) });
+/**
+ * A human-only project conversation message. These messages are deliberately
+ * separate from requests/refinements and never participate in a Task.
+ */
+export const CreateTeamMessageSchema = z.object({
+  projectId: z.string(),
+  body: z.string().trim().min(1).max(10_000),
+  replyToMessageId: z.string().nullable().optional(),
+});
+export const InitializeRepositorySchema = RepositoryInitializationSchema.extend({ projectId: z.string() });
 export const CreateProjectSchema = z.object({
   name: z.string().trim().min(2).max(100),
   repositoryUrl: z.string().trim().min(5).max(2_000),
@@ -136,6 +155,8 @@ export interface ClientToServerEvents {
   PROCESS_STATUS: (payload: { projectId: string; name: string; status: "starting" | "running" | "stopped" | "failed"; port?: number; url?: string }) => void;
   ACTIVITY_EVENT: (payload: z.infer<typeof ActivityInputSchema>) => void;
   CREATE_REQUEST: (payload: z.infer<typeof CreateRequestSchema>) => void;
+  CREATE_TEAM_MESSAGE: (payload: z.infer<typeof CreateTeamMessageSchema>) => void;
+  INITIALIZE_REPOSITORY: (payload: z.infer<typeof InitializeRepositorySchema>) => void;
   CREATE_REFINEMENT: (payload: z.infer<typeof CreateRefinementSchema>) => void;
   PAUSE_ACTIVE_TASK: (payload: z.infer<typeof TaskControlSchema>) => void;
   RESUME_ACTIVE_TASK: (payload: z.infer<typeof TaskControlSchema>) => void;

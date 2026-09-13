@@ -8,7 +8,9 @@ COPY apps/daemon/package.json apps/daemon/package.json
 COPY apps/companion/package.json apps/companion/package.json
 RUN npm ci
 COPY . .
-RUN npm run db:generate && npm run build
+RUN npm run db:generate \
+    && npm run build -w @relaycode/shared \
+    && npm run build
 
 FROM node:22-alpine AS runtime
 WORKDIR /app

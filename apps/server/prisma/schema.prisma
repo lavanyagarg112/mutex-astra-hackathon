@@ -17,6 +17,11 @@ enum TaskType {
   REFINEMENT
 }
 
+enum TaskExecutionMode {
+  NORMAL
+  INITIALIZATION
+}
+
 enum TaskStatus {
   QUEUED
   WAITING_FOR_REQUESTER
@@ -145,6 +150,8 @@ model Task {
   rootMessageId     String @unique
   parentTaskId      String?
   type              TaskType
+  executionMode     TaskExecutionMode @default(NORMAL)
+  initializationConfig Json?
   status            TaskStatus @default(QUEUED)
   queuePriority     Int
   queueSequence     Int

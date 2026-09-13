@@ -53,9 +53,9 @@ import {
   Zap,
 } from "lucide-react";
 import { forwardRef, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import type { Activity, PixelSkinId, Project, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
+import type { Activity, Message, PixelSkinId, Project, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
 import { activeStatuses } from "@relaycode/shared";
-import { API_URL, api, beginGithubLogin, connectSocket, getActiveUserId, loginWithUsername, logout, setActiveUserId } from "./lib/api";
+import { API_URL, ApiError, api, beginGithubLogin, connectSocket, getActiveUserId, loginWithUsername, logout, setActiveUserId } from "./lib/api";
 import type { Socket } from "socket.io-client";
 import type { ClientToServerEvents, ServerToClientEvents } from "@relaycode/shared";
 import { PixelAvatar, PixelCrew } from "./PixelCrew";
@@ -65,8 +65,8 @@ type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 type Member = User & { online: boolean; present: boolean; daemonVersion?: string; syncedSha?: string; mapped?: boolean; synchronized?: boolean; localPath?: string; color: string };
 type ProjectItem = Project & { members: Member[]; onlineCount: number };
 type ProcessInfo = { name: string; status: "running" | "stopped" | "starting" | "failed"; port?: number; url?: string };
-type ProjectData = { project: ProjectItem; tasks: Task[]; activity: Activity[]; processes: ProcessInfo[] };
-type ModalName = "project" | "createProject" | "user" | "share" | "rollback" | "cancel" | null;
+type ProjectData = { project: ProjectItem; tasks: Task[]; messages: Message[]; activity: Activity[]; processes: ProcessInfo[] };
+type ModalName = "project" | "createProject" | "initialize" | "user" | "share" | "rollback" | "cancel" | null;
 type Toast = { id: number; message: string; tone?: "success" | "warning" };
 type GithubRepository = { id: number | string; fullName: string; name: string; owner: string; cloneUrl: string; defaultBranch: string; private?: boolean; canWrite?: boolean; permissions?: { push?: boolean } };
 type InferredCommands = Pick<Project, "installCommand" | "frontendCommand" | "backendCommand" | "testCommand"> & {
@@ -75,6 +75,10 @@ type InferredCommands = Pick<Project, "installCommand" | "frontendCommand" | "ba
   diagnostics?: string[];
 };
 type PairingState = { status: "pairing" | "ready" | "error"; code?: string; message?: string };
+type JoinState = { status: "joining" | "error" | "read-only"; message?: string };
+type RepositoryFrontend = "REACT" | "NEXT_JS" | "VUE" | "SVELTE" | "NONE";
+type RepositoryBackend = "EXPRESS" | "FASTIFY" | "NEST_JS" | "FASTAPI" | "DJANGO" | "NONE";
+type RepositoryDatabase = "POSTGRESQL" | "MYSQL" | "SQLITE" | "MONGODB" | "NONE";
 
 const alice: Member = { id: "alice", name: "Alice Chen", username: "alice", online: true, present: true, daemonVersion: "0.4.2", syncedSha: "4af71c2", color: "#343434" };
 const bob: Member = { id: "bob", name: "Bob Rivera", username: "bob", online: true, present: true, daemonVersion: "0.4.2", syncedSha: "4af71c2", color: "#8e6b3d" };
@@ -117,6 +121,7 @@ function normalizeProjectPayload(raw: unknown): ProjectData | null {
   return {
     project,
     tasks: source.tasks as Task[],
+    messages: (Array.isArray(source.messages) ? source.messages : []) as Message[],
     activity: (Array.isArray(source.activities) ? source.activities : Array.isArray(source.activity) ? source.activity : []) as Activity[],
     processes: rawProcesses.map((entry) => {
       const process = entry as { name?: string; status?: string; port?: number; url?: string };
@@ -178,7 +183,8 @@ function Workspace() {
   const [rightPanel, setRightPanel] = useState<"preview" | "activity">("preview");
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [currentUser, setCurrentUser] = useState<User>(() => getActiveUserId() === "bob" ? bob : getActiveUserId() === "charlie" ? charlie : alice);
-  const [joinState, setJoinState] = useState<{ status: "joining" | "error"; message?: string } | null>(null);
+  const [joinState, setJoinState] = useState<JoinState | null>(null);
+  const [joinAttempt, setJoinAttempt] = useState(0);
   const [pairingState, setPairingState] = useState<PairingState | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
@@ -198,8 +204,8 @@ function Workspace() {
         setServerMode("live");
       }
     } catch (reason) {
-      if (reason && typeof reason === "object" && "status" in reason && reason.status === 403) {
-        setJoinState({ status: "error", message: "Your GitHub account does not have access to this project’s repository. Ask the owner to grant repository access, then try again." });
+      if (reason instanceof ApiError && reason.status === 403) {
+        setJoinState({ status: "error", message: reason.message });
         return;
       }
       setData(null);
@@ -228,6 +234,7 @@ function Workspace() {
     nextSocket.on("connect_error", () => setServerMode("connecting"));
     nextSocket.on("QUEUE_UPDATED", refresh);
     nextSocket.on("TASK_UPDATED", refresh);
+    nextSocket.on("MESSAGE_CREATED", refresh);
     nextSocket.on("ACTIVITY_CREATED", refresh);
     nextSocket.on("DIFF_AVAILABLE", refresh);
     nextSocket.on("MEMBER_STATUS_CHANGED", refresh);
@@ -245,23 +252,25 @@ function Workspace() {
     if (!match) return;
     const invitedProjectId = decodeURIComponent(match[1]!);
     setJoinState({ status: "joining" });
-    void api<{ project: Project }>(`/api/projects/${invitedProjectId}/join`, { method: "POST" })
-      .then(({ project }) => {
+    void api<{ project: Project; membership?: { role: string; repositoryWrite: boolean } }>(`/api/projects/${invitedProjectId}/join`, { method: "POST" })
+      .then(({ project, membership }) => {
         const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 });
         setProjects((items) => items.some((item) => item.id === project.id) ? items : [...items, normalized]);
         setProjectId(project.id);
-        setJoinState(null);
-        window.history.replaceState({}, "", "/");
-        toast(`Joined ${project.name}. Repository access verified.`);
+        if (membership?.repositoryWrite === false) {
+          setJoinState({ status: "read-only", message: `You joined ${project.name} with read-only repository access. You can follow the queue, but coding requests and Git operations require write access.` });
+        } else {
+          setJoinState(null);
+          window.history.replaceState({}, "", "/");
+          toast(`Joined ${project.name}. Repository access verified.`);
+        }
       })
       .catch((reason: unknown) => {
-        let messageText = reason instanceof Error ? reason.message : "You could not join this project.";
-        try { messageText = JSON.parse(messageText).error ?? messageText; } catch { /* plain server response */ }
-        setJoinState({ status: "error", message: messageText });
+        setJoinState({ status: "error", message: reason instanceof Error ? reason.message : "You could not join this project." });
       });
     // Invitation is handled once on initial load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [joinAttempt]);
 
   useEffect(() => {
     if (window.location.pathname !== "/companion/connect") return;
@@ -280,10 +289,20 @@ function Workspace() {
     .filter((task) => task.status === "QUEUED" || task.status === "WAITING_FOR_REQUESTER" || task.status === "REMOTE_DIVERGED")
     .sort((a, b) => b.queuePriority - a.queuePriority || a.queueSequence - b.queueSequence), [tasks]);
   const queuePositions = useMemo(() => new Map(pending.map((task, index) => [task.id, index + 1])), [pending]);
-  const conversation = useMemo(() => [...tasks].sort((a, b) => {
-    const byCreatedAt = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-    return byCreatedAt || a.number - b.number;
-  }), [tasks]);
+  const conversation = useMemo(() => {
+    const taskMessageIds = new Set(tasks.flatMap((task) => [task.rootMessageId, ...(task.messages ?? []).map((message) => message.id)]));
+    return [
+      ...tasks.map((task) => ({ kind: "task" as const, createdAt: task.createdAt, task })),
+      ...(data?.messages ?? [])
+        .filter((message) => !taskMessageIds.has(message.id))
+        .map((message) => ({ kind: "message" as const, createdAt: message.createdAt, message })),
+    ].sort((a, b) => {
+      const byCreatedAt = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (byCreatedAt) return byCreatedAt;
+      if (a.kind === "task" && b.kind === "task") return a.task.number - b.task.number;
+      return a.kind === "message" ? 1 : -1;
+    });
+  }, [data?.messages, tasks]);
 
   const chooseProject = (id: string) => {
     setProjectId(id);
@@ -329,13 +348,15 @@ function Workspace() {
               <QueueHeader active={active} pendingCount={pending.length} />
               <div className="fine-scrollbar flex-1 overflow-y-auto px-4 pb-44 pt-2 sm:px-6 lg:px-8">
                 <div className="mx-auto max-w-3xl space-y-3">
-                  {conversation.length ? conversation.map((task) => {
+                  {conversation.length ? conversation.map((item) => {
+                    if (item.kind === "message") return <TeamMessage key={`message:${item.message.id}`} message={item.message} currentUser={currentUser} />;
+                    const task = item.task;
                     const taskIsActive = active?.id === task.id;
-                    return <TaskCard key={task.id} task={task} queuePosition={queuePositions.get(task.id)} onRefine={(item) => { setComposerReply(item); composerRef.current?.focus(); }} onPause={() => taskIsActive && emitControl("pause", task)} onResume={() => taskIsActive && emitControl("resume", task)} onCancel={() => { if (taskIsActive) { setSelectedTask(task); setModal("cancel"); } }} onRollback={(item) => { setSelectedTask(item); setModal("rollback"); }} />;
+                    return <TaskCard key={`task:${task.id}`} task={task} queuePosition={queuePositions.get(task.id)} onRefine={(item) => { setComposerReply(item); composerRef.current?.focus(); }} onPause={() => taskIsActive && emitControl("pause", task)} onResume={() => taskIsActive && emitControl("resume", task)} onCancel={() => { if (taskIsActive) { setSelectedTask(task); setModal("cancel"); } }} onRollback={(item) => { setSelectedTask(item); setModal("rollback"); }} />;
                   }) : <EmptyQueue />}
                 </div>
               </div>
-              <Composer ref={composerRef} project={data.project} user={currentUser} replyTask={composerReply} serverMode={serverMode} socket={socket} onCancelReply={() => setComposerReply(null)} onCreated={(task) => { setData((current) => current ? ({ ...current, tasks: [...current.tasks, task] }) : current); toast(task.type === "REFINEMENT" ? "Refinement added at high priority." : "Request added to the execution queue."); }} />
+              <Composer ref={composerRef} project={data.project} user={currentUser} replyTask={composerReply} serverMode={serverMode} socket={socket} onCancelReply={() => setComposerReply(null)} onCreated={(task) => { setData((current) => current ? ({ ...current, tasks: [...current.tasks, task] }) : current); toast(task.type === "REFINEMENT" ? "Refinement added at high priority." : "Request added to the execution queue."); }} onMessageCreated={(message) => { setData((current) => current ? ({ ...current, messages: current.messages.some((item) => item.id === message.id) ? current.messages : [...current.messages, message] }) : current); }} />
             </section>
 
             <aside className="hidden min-h-0 bg-[#fafaf9] xl:flex xl:flex-col">
@@ -357,15 +378,16 @@ function Workspace() {
 
       <PixelCrew members={data.project.members} activeTask={active} projectId={projectId} socket={socket} currentUserId={currentUser.id} />
 
-      {modal === "project" && <ProjectSettingsModal project={data.project} socket={socket} onClose={() => setModal(null)} onSave={(project) => { setData((current) => current ? ({ ...current, project: { ...current.project, ...project } }) : current); setModal(null); toast("Project settings saved."); }} />}
+      {modal === "project" && <ProjectSettingsModal project={data.project} socket={socket} onClose={() => setModal(null)} onInitialize={() => setModal("initialize")} onSave={(project) => { setData((current) => current ? ({ ...current, project: { ...current.project, ...project } }) : current); setModal(null); toast("Project settings saved."); }} />}
       {modal === "createProject" && <CreateProjectModal user={currentUser} onClose={() => setModal(null)} onCreated={(project) => { const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 }); setProjects((current) => [...current, normalized]); setProjectId(project.id); setModal(null); toast("Project created. Open the companion to clone or connect the repository."); }} />}
+      {modal === "initialize" && <InitializeRepositoryModal project={data.project} onClose={() => setModal(null)} onStarted={() => { setModal(null); toast("Repository initialization queued. It will run on your companion without requiring an existing validation command."); }} />}
       {modal === "user" && <UserSettingsModal projects={projects} user={currentUser} socket={socket} onClose={() => setModal(null)} onUpdated={setCurrentUser} />}
       {modal === "share" && <ShareModal project={data.project} onClose={() => setModal(null)} toast={toast} />}
       {modal === "cancel" && selectedTask && <CancelModal task={selectedTask} onClose={() => setModal(null)} onConfirm={() => { emitControl("cancel", selectedTask); setModal(null); }} />}
       {modal === "rollback" && selectedTask && <RollbackModal task={selectedTask} allTasks={data.tasks} socket={socket} serverMode={serverMode} onClose={() => setModal(null)} onConfirm={(discarded) => {
         setModal(null); toast(`Remote history reset. ${discarded.length} task${discarded.length === 1 ? "" : "s"} removed from ${data.project.branch}.`, "warning");
       }} />}
-      {joinState && <JoinProjectStatus state={joinState} onClose={() => { setJoinState(null); window.history.replaceState({}, "", "/"); }} />}
+      {joinState && <JoinProjectStatus state={joinState} onRetry={() => setJoinAttempt((attempt) => attempt + 1)} onClose={() => { setJoinState(null); window.history.replaceState({}, "", "/"); }} />}
       {pairingState && <CompanionConnectStatus state={pairingState} onClose={() => { setPairingState(null); window.history.replaceState({}, "", "/"); }} />}
     </div>
   );
@@ -559,6 +581,21 @@ function TaskCard({ task, queuePosition, onRefine, onPause, onResume, onCancel, 
   </article>;
 }
 
+function TeamMessage({ message, currentUser }: { message: Message; currentUser: User }) {
+  const person = message.author ?? (message.authorId === currentUser.id ? currentUser : { id: message.authorId, name: "Teammate", username: "teammate" });
+  const mine = message.authorId === currentUser.id;
+  return <div className={cx("flex items-start gap-3 px-4 py-2", mine && "flex-row-reverse")}>
+    <Avatar user={person} size="sm" />
+    <div className={cx("max-w-[78%]", mine && "text-right")}>
+      <div className={cx("mb-1 flex items-center gap-2 text-[10px]", mine && "justify-end")}><span className="font-semibold text-zinc-700">{person.name}</span><span className="text-zinc-400">{when(message.createdAt)}</span></div>
+      <div className={cx("inline-block rounded-2xl px-3.5 py-2.5 text-left text-[13px] leading-5", mine ? "rounded-tr-md bg-zinc-900 text-white" : "rounded-tl-md bg-zinc-100 text-zinc-800")}>
+        {message.body}
+      </div>
+      <div className="mt-1 text-[9px] text-zinc-400">Team message · not shared with the agent</div>
+    </div>
+  </div>;
+}
+
 function DiffViewer({ diff }: { diff: StoredDiff }) {
   const [view, setView] = useState<"files" | "patch">("files");
   return <div className="mt-3 overflow-hidden rounded-xl border border-zinc-200 bg-[#fbfbfa]">
@@ -570,31 +607,46 @@ function DiffViewer({ diff }: { diff: StoredDiff }) {
   </div>;
 }
 
-function EmptyQueue() { return <div className="rounded-2xl border border-dashed border-zinc-200 py-9 text-center"><CheckCircle2 className="mx-auto text-zinc-300" size={22} /><div className="mt-2 text-[12px] font-medium text-zinc-500">Queue is clear</div><p className="mt-1 text-[10px] text-zinc-400">New requests can start immediately.</p></div>; }
+function EmptyQueue() { return <div className="rounded-2xl border border-dashed border-zinc-200 py-9 text-center"><CheckCircle2 className="mx-auto text-zinc-300" size={22} /><div className="mt-2 text-[12px] font-medium text-zinc-500">Start the conversation</div><p className="mt-1 text-[10px] text-zinc-400">Message your team or send the agent a coding request.</p></div>; }
 
-const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: User; replyTask: Task | null; serverMode: "connecting" | "live" | "demo"; socket: AppSocket | null; onCancelReply: () => void; onCreated: (task: Task) => void }>(function Composer({ project, user, replyTask, serverMode, socket, onCancelReply, onCreated }, ref) {
+const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: User; replyTask: Task | null; serverMode: "connecting" | "live" | "demo"; socket: AppSocket | null; onCancelReply: () => void; onCreated: (task: Task) => void; onMessageCreated: (message: Message) => void }>(function Composer({ project, user, replyTask, serverMode, socket, onCancelReply, onCreated, onMessageCreated }, ref) {
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
   const [explicit, setExplicit] = useState(true);
+  const [mode, setMode] = useState<"agent" | "team">("agent");
+  const [error, setError] = useState("");
+  useEffect(() => { if (replyTask) setMode("agent"); }, [replyTask]);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (!body.trim() || sending) return;
-    setSending(true);
+    setSending(true); setError("");
     const text = body.trim();
     try {
       if (serverMode !== "live") throw new Error("Relaycode is reconnecting. Try again in a moment.");
-      const created = await api<Task>(replyTask ? "/api/refinements" : "/api/requests", { method: "POST", body: JSON.stringify(replyTask ? { projectId: project.id, parentTaskId: replyTask.id, body: text, explicit } : { projectId: project.id, body: text }) });
-      onCreated(created);
+      if (mode === "team" && !replyTask) {
+        const created = await api<Message>(`/api/projects/${project.id}/messages`, { method: "POST", body: JSON.stringify({ body: text }) });
+        onMessageCreated(created);
+      } else {
+        const created = await api<Task>(replyTask ? "/api/refinements" : "/api/requests", { method: "POST", body: JSON.stringify(replyTask ? { projectId: project.id, parentTaskId: replyTask.id, body: text, explicit } : { projectId: project.id, body: text }) });
+        onCreated(created);
+      }
       setBody(""); onCancelReply();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not send your message.");
     } finally { setSending(false); }
   };
   return <form onSubmit={submit} className="absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-white via-white to-transparent px-4 pb-4 pt-10 sm:px-6 lg:px-8">
     <div className="overflow-hidden rounded-[17px] border border-zinc-300 bg-white shadow-[0_16px_50px_rgba(24,24,27,.12)] transition focus-within:border-zinc-500 focus-within:ring-2 focus-within:ring-zinc-100">
+      {!replyTask && <div className="flex items-center gap-1 border-b border-zinc-100 px-3 pt-2.5">
+        <button type="button" onClick={() => setMode("team")} className={cx("flex items-center gap-1.5 rounded-t-lg px-3 py-2 text-[10px] font-medium transition", mode === "team" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-700")}><UsersRound size={12} /> Team message</button>
+        <button type="button" onClick={() => setMode("agent")} className={cx("flex items-center gap-1.5 rounded-t-lg px-3 py-2 text-[10px] font-medium transition", mode === "agent" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-700")}><Bot size={12} /> Agent request</button>
+      </div>}
       {replyTask && <div className="flex items-center gap-2 border-b border-zinc-100 bg-amber-50/70 px-3.5 py-2 text-[10px]"><MessageSquareReply size={12} className="text-amber-700" /><span className="font-medium text-amber-900">Refining Request #{replyTask.number}</span><span className="min-w-0 flex-1 truncate text-amber-700/70">{replyTask.rootMessage?.body}</span><label className="hidden items-center gap-1.5 text-[9px] text-amber-800 sm:flex"><input checked={explicit} onChange={(event) => setExplicit(event.target.checked)} type="checkbox" className="accent-zinc-900" /> Explicit reply</label><button type="button" onClick={onCancelReply} className="rounded p-1 text-amber-700 hover:bg-amber-100"><X size={12} /></button></div>}
-      <textarea ref={ref} value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={2} placeholder={replyTask ? "Describe the change to this request…" : "Ask the team agent to build something…"} className="block max-h-36 min-h-[66px] w-full resize-none bg-transparent px-4 pb-2 pt-3 text-[12px] leading-5 outline-none placeholder:text-zinc-400" />
+      <textarea ref={ref} value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={2} placeholder={replyTask ? "Describe the change to this request…" : mode === "team" ? "Message everyone in this project…" : "Ask the agent to build something…"} className="block max-h-36 min-h-[66px] w-full resize-none bg-transparent px-4 pb-2 pt-3 text-[12px] leading-5 outline-none placeholder:text-zinc-400" />
+      {error && <div className="mx-3 mb-2 rounded-lg bg-red-50 px-2.5 py-2 text-[10px] text-red-700">{error}</div>}
       <div className="flex items-center gap-2 px-3 pb-3">
-        <button type="button" className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-2 py-1.5 text-[9px] font-medium text-zinc-500 hover:bg-zinc-50"><Plus size={11} /> Attach context</button>
-        <span className="hidden text-[9px] text-zinc-400 sm:inline">Runs on your connected companion</span>
-        <button disabled={!body.trim() || sending} className="ml-auto grid size-8 place-items-center rounded-[10px] bg-zinc-950 text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400" aria-label="Submit request">{sending ? <LoaderCircle size={14} className="animate-spin" /> : <Send size={13} />}</button>
+        {mode === "agent" && <button type="button" className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-2 py-1.5 text-[9px] font-medium text-zinc-500 hover:bg-zinc-50"><Plus size={11} /> Attach context</button>}
+        <span className="hidden text-[9px] text-zinc-400 sm:inline">{mode === "team" && !replyTask ? "Visible to project members only · the agent cannot read it" : "Creates a task on your connected companion"}</span>
+        <button disabled={!body.trim() || sending} className="ml-auto grid size-8 place-items-center rounded-[10px] bg-zinc-950 text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400" aria-label={mode === "team" && !replyTask ? "Send team message" : "Submit agent request"}>{sending ? <LoaderCircle size={14} className="animate-spin" /> : <Send size={13} />}</button>
       </div>
     </div>
   </form>;
@@ -705,7 +757,10 @@ function CreateProjectModal({ user, onClose, onCreated }: { user: User; onClose:
         setRepositories(normalized);
         if (normalized.length === 0) setManualEntry(true);
       })
-      .catch(() => setManualEntry(true))
+      .catch((reason: unknown) => {
+        setManualEntry(true);
+        setError(reason instanceof Error ? reason.message : "GitHub repositories could not be loaded. Reconnect GitHub and try again.");
+      })
       .finally(() => setLoadingRepositories(false));
   }, []);
   const chooseRepository = (value: string) => {
@@ -736,7 +791,7 @@ function CreateProjectModal({ user, onClose, onCreated }: { user: User; onClose:
   </Modal>;
 }
 
-function ProjectSettingsModal({ project, socket, onClose, onSave }: { project: ProjectItem; socket: AppSocket | null; onClose: () => void; onSave: (project: ProjectItem) => void }) {
+function ProjectSettingsModal({ project, socket, onClose, onInitialize, onSave }: { project: ProjectItem; socket: AppSocket | null; onClose: () => void; onInitialize: () => void; onSave: (project: ProjectItem) => void }) {
   const [draft, setDraft] = useState(project);
   const [agentCredential, setAgentCredential] = useState("");
   const [clearAgentCredential, setClearAgentCredential] = useState(false);
@@ -771,15 +826,56 @@ function ProjectSettingsModal({ project, socket, onClose, onSave }: { project: P
   return <Modal onClose={onClose} width="max-w-2xl"><ModalHeader icon={<Settings size={16} />} title="Project settings" description="Repository rules, agent models, tool permissions, and local commands." onClose={onClose} />
     <div className="flex border-b border-zinc-100 px-5 sm:px-6">{(["repository", "agent", "commands"] as const).map((item) => <button key={item} onClick={() => setTab(item)} className={cx("relative px-3 py-3 text-[10px] font-medium capitalize", tab === item ? "text-zinc-900" : "text-zinc-400")}>{item}{tab === item && <span className="absolute inset-x-2 bottom-0 h-[2px] bg-zinc-900" />}</button>)}</div>
     <div className="min-h-[370px] p-5 sm:p-6">
-      {tab === "repository" && <div className="space-y-5"><div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4"><div className="flex items-center gap-2 text-[11px] font-semibold"><Github size={15} /> {project.repositoryOwner}/{project.repositoryName}<span className="ml-auto flex items-center gap-1 text-[9px] font-medium text-emerald-700"><CheckCircle2 size={11} /> Write access verified</span></div><p className="mt-2 text-[9px] leading-4 text-zinc-500">The remote branch is the canonical source. Every companion hard-resets tracked files before execution.</p></div><div className="grid gap-4 sm:grid-cols-2"><Field label="Repository owner"><input disabled value={project.repositoryOwner} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field><Field label="Repository"><input disabled value={project.repositoryName} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field></div><Field label="Configured branch" hint="History rewriting must be allowed for rollback"><div className="relative"><GitBranch size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft.branch} onChange={(event) => setDraft({ ...draft, branch: event.target.value })} className={cx(fieldClass, "pl-9")} /></div></Field><div className="flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[9px] leading-4 text-amber-900"><AlertTriangle size={14} className="mt-0.5 shrink-0" /> Destructive rollback rewrites this branch with force-with-lease. Protected branches may reject the operation safely.</div></div>}
+      {tab === "repository" && <div className="space-y-5"><div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4"><div className="flex items-center gap-2 text-[11px] font-semibold"><Github size={15} /> {project.repositoryOwner}/{project.repositoryName}<span className="ml-auto flex items-center gap-1 text-[9px] font-medium text-emerald-700"><CheckCircle2 size={11} /> Write access verified</span></div><p className="mt-2 text-[9px] leading-4 text-zinc-500">The remote branch is the source of truth. Every companion hard-resets tracked files before execution.</p></div><div className="grid gap-4 sm:grid-cols-2"><Field label="Repository owner"><input disabled value={project.repositoryOwner} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field><Field label="Repository"><input disabled value={project.repositoryName} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field></div><Field label="Configured branch" hint="History rewriting must be allowed for rollback"><div className="relative"><GitBranch size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft.branch} onChange={(event) => setDraft({ ...draft, branch: event.target.value })} className={cx(fieldClass, "pl-9")} /></div></Field><div className="flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[9px] leading-4 text-amber-900"><AlertTriangle size={14} className="mt-0.5 shrink-0" /> Destructive rollback rewrites this branch with force-with-lease. Protected branches may reject the operation safely.</div></div>}
       {tab === "agent" && <div className="space-y-5"><div className="grid gap-4 sm:grid-cols-2"><Field label="Coordinator model" hint="Classifies only"><select value={draft.coordinatorModel} onChange={(event) => setDraft({ ...draft, coordinatorModel: event.target.value })} className={fieldClass}><option>coordinator-lite</option><option>gpt-5-mini</option><option>local-classifier</option></select></Field><Field label="Developer model" hint="Runs locally"><select value={draft.developerModel} onChange={(event) => setDraft({ ...draft, developerModel: event.target.value })} className={fieldClass}><option>gpt-5.6-sol</option><option>local-agent</option><option>command</option><option>demo</option></select></Field></div><Field label={project.agentCredentialConfigured ? "Replace shared OpenAI key (optional)" : "Shared OpenAI key"} hint="One project owner configures this once"><input type="password" autoComplete="off" value={agentCredential} disabled={clearAgentCredential} onChange={(event) => setAgentCredential(event.target.value)} placeholder={project.agentCredentialConfigured ? "••••••••••••••••  (configured)" : "sk-…"} className={fieldClass} /></Field><div className="flex items-center justify-between rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5"><div><div className="text-[10px] font-medium text-zinc-700">{project.agentCredentialConfigured ? "Shared key configured" : "No shared key configured"}</div><div className="mt-0.5 text-[9px] text-zinc-400">The key is never returned to browsers or written to activity logs.</div></div>{project.agentCredentialConfigured && <button type="button" onClick={() => { setClearAgentCredential((value) => !value); setAgentCredential(""); }} className={cx("rounded-lg px-3 py-1.5 text-[9px] font-medium", clearAgentCredential ? "bg-red-600 text-white" : "border border-zinc-200 bg-white text-red-600")}>{clearAgentCredential ? "Will remove on save" : "Remove key"}</button>}</div><div><div className="text-[10px] font-semibold text-zinc-700">Tool permissions</div><div className="mt-2 divide-y divide-zinc-100 rounded-xl border border-zinc-200 px-3">{Object.entries(permissions).map(([name, enabled]) => <label key={name} className="flex items-center py-2.5 text-[10px]"><span className="text-zinc-600">{name}</span><button type="button" aria-pressed={enabled} onClick={() => setPermissions({ ...permissions, [name]: !enabled })} className={cx("ml-auto h-5 w-9 rounded-full p-0.5 transition", enabled ? "bg-zinc-900" : "bg-zinc-200")}><span className={cx("block size-4 rounded-full bg-white shadow-sm transition-transform", enabled && "translate-x-4")} /></button></label>)}</div></div></div>}
       {tab === "commands" && <div className="space-y-4">
+        <div className="flex items-center justify-between gap-4 rounded-xl border border-zinc-900 bg-zinc-950 p-4 text-white"><div><div className="flex items-center gap-2 text-[11px] font-semibold"><Zap size={13} fill="currentColor" /> Initialize or complete setup</div><p className="mt-1 text-[9px] leading-4 text-zinc-400">Works for new repositories and existing websites whose run or validation commands are missing. Existing application code is preserved.</p></div><button type="button" onClick={onInitialize} className="shrink-0 rounded-lg bg-white px-3 py-2 text-[9px] font-semibold text-zinc-950 hover:bg-zinc-100">Choose stack</button></div>
         <div className="flex items-start justify-between gap-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3"><p className="text-[10px] leading-4 text-zinc-500">Relaycode inspects manifests, README instructions, workspace files, Makefiles, environment examples, and CI configuration. When a shared OpenAI key is configured, the project agent selects the best repository-grounded commands. Every result remains editable.</p><button type="button" disabled={detectingCommands} onClick={() => void detectCommands()} className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[9px] font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:text-zinc-300"><RefreshCw size={11} className={detectingCommands ? "animate-spin" : ""} />{detectingCommands ? "Agent inspecting…" : "Infer again"}</button></div>
         {commandDetectionMessage && <p className={cx("rounded-lg px-3 py-2 text-[9px] leading-4", commandDetectionFailed ? "bg-red-50 text-red-700" : "bg-emerald-50 text-emerald-700")}>{commandDetectionMessage}</p>}
         {(["installCommand", "frontendCommand", "backendCommand", "testCommand"] as const).map((key) => <Field key={key} label={key.replace("Command", " command").replace(/^./, (character) => character.toUpperCase())} hint={key === "testCommand" ? "Must succeed before a push" : undefined}><div className="relative"><TerminalSquare size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft[key] ?? ""} onChange={(event) => setDraft({ ...draft, [key]: event.target.value || null })} placeholder={key === "installCommand" ? "npm install" : key === "frontendCommand" ? "npm run dev" : key === "backendCommand" ? "npm run server" : "npm test"} className={cx(fieldClass, "pl-9 font-mono")} /></div></Field>)}
       </div>}
     </div>
     <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-5 py-4 sm:px-6"><button onClick={onClose} className="rounded-xl px-4 py-2.5 text-[10px] font-medium text-zinc-500 hover:bg-zinc-50">Cancel</button><button onClick={save} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Save changes</button></div>
+  </Modal>;
+}
+
+function InitializeRepositoryModal({ project, onClose, onStarted }: { project: ProjectItem; onClose: () => void; onStarted: () => void }) {
+  const [frontend, setFrontend] = useState<RepositoryFrontend>("REACT");
+  const [backend, setBackend] = useState<RepositoryBackend>("EXPRESS");
+  const [database, setDatabase] = useState<RepositoryDatabase>("POSTGRESQL");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/projects/${project.id}/initialize`, {
+        method: "POST",
+        body: JSON.stringify({ projectId: project.id, frontend, backend, database }),
+      });
+      onStarted();
+    } catch (reason) {
+      let message = reason instanceof Error ? reason.message : "Could not initialize this repository.";
+      try { message = JSON.parse(message).error ?? message; } catch { /* plain server response */ }
+      setError(message);
+      setSaving(false);
+    }
+  };
+  return <Modal onClose={onClose} width="max-w-lg">
+    <ModalHeader icon={<Zap size={16} />} title="Initialize or complete setup" description="Choose the stack. Relaycode preserves an existing site and fills in missing setup commands." onClose={onClose} />
+    <form onSubmit={submit}>
+      <div className="space-y-4 p-5 sm:p-6">
+        <div className="flex gap-2 rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-[9px] leading-4 text-blue-900"><ShieldCheck size={13} className="mt-0.5 shrink-0" /><span>This setup run does not require or run a pre-existing validation command. Relaycode inspects and preserves an existing application, fills in missing setup, then saves the detected install, preview, and validation commands.</span></div>
+        <Field label="Frontend"><select autoFocus value={frontend} onChange={(event) => setFrontend(event.target.value as RepositoryFrontend)} className={fieldClass}><option value="REACT">React</option><option value="NEXT_JS">Next.js</option><option value="VUE">Vue</option><option value="SVELTE">Svelte</option><option value="NONE">No frontend</option></select></Field>
+        <Field label="Backend"><select value={backend} onChange={(event) => setBackend(event.target.value as RepositoryBackend)} className={fieldClass}><option value="EXPRESS">Express</option><option value="FASTIFY">Fastify</option><option value="NEST_JS">NestJS</option><option value="FASTAPI">FastAPI</option><option value="DJANGO">Django</option><option value="NONE">No backend</option></select></Field>
+        <Field label="Database"><select value={database} onChange={(event) => setDatabase(event.target.value as RepositoryDatabase)} className={fieldClass}><option value="POSTGRESQL">PostgreSQL</option><option value="MYSQL">MySQL</option><option value="SQLITE">SQLite</option><option value="MONGODB">MongoDB</option><option value="NONE">No database</option></select></Field>
+        <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-[9px] leading-4 text-zinc-500"><strong className="text-zinc-700">Remote target:</strong> {project.repositoryOwner}/{project.repositoryName} · {project.branch}</div>
+        {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-[10px] text-red-700">{error}</p>}
+      </div>
+      <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-5 py-4 sm:px-6"><button type="button" onClick={onClose} className="rounded-xl px-4 py-2.5 text-[10px] font-medium text-zinc-500 hover:bg-zinc-50">Cancel</button><button disabled={saving} className="flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white disabled:bg-zinc-300">{saving && <LoaderCircle size={12} className="animate-spin" />}{saving ? "Starting…" : "Initialize repository"}</button></div>
+    </form>
   </Modal>;
 }
 
@@ -836,13 +932,17 @@ function ShareModal({ project, onClose, toast }: { project: ProjectItem; onClose
   </Modal>;
 }
 
-function JoinProjectStatus({ state, onClose }: { state: { status: "joining" | "error"; message?: string }; onClose: () => void }) {
-  return <Modal onClose={state.status === "error" ? onClose : () => undefined} width="max-w-md">
+function JoinProjectStatus({ state, onClose, onRetry }: { state: JoinState; onClose: () => void; onRetry: () => void }) {
+  const joining = state.status === "joining";
+  const readOnly = state.status === "read-only";
+  return <Modal onClose={joining ? () => undefined : onClose} width="max-w-md">
     <div className="p-7 text-center">
-      <div className={cx("mx-auto grid size-11 place-items-center rounded-xl", state.status === "joining" ? "bg-zinc-100 text-zinc-600" : "bg-red-50 text-red-600")}>{state.status === "joining" ? <LoaderCircle size={19} className="animate-spin" /> : <ShieldCheck size={19} />}</div>
-      <h3 className="mt-4 text-[16px] font-semibold tracking-tight">{state.status === "joining" ? "Verifying repository access" : "You can’t join this project"}</h3>
-      <p className="mx-auto mt-2 max-w-sm text-[11px] leading-5 text-zinc-500">{state.status === "joining" ? "Relaycode is checking that your GitHub account has access to this repository." : state.message ?? "Your GitHub account does not have access to the project repository. Ask the owner to grant access, then try the invite again."}</p>
-      {state.status === "error" && <div className="mt-5 flex justify-center gap-2"><button onClick={onClose} className="rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-600">Back to projects</button><button onClick={beginGithubLogin} className="flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white"><Github size={13} /> Use another GitHub account</button></div>}
+      <div className={cx("mx-auto grid size-11 place-items-center rounded-xl", joining ? "bg-zinc-100 text-zinc-600" : readOnly ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-600")}>{joining ? <LoaderCircle size={19} className="animate-spin" /> : readOnly ? <Eye size={19} /> : <AlertTriangle size={19} />}</div>
+      <h3 className="mt-4 text-[16px] font-semibold tracking-tight">{joining ? "Verifying repository access" : readOnly ? "Joined with read-only access" : "Couldn’t join this project"}</h3>
+      <p className="mx-auto mt-2 max-w-sm text-[11px] leading-5 text-zinc-500">{joining ? "Relaycode is checking that your GitHub account has access to this repository." : state.message ?? "Relaycode could not verify access to the project repository."}</p>
+      {state.status === "error" && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-left text-[10px] leading-4 text-amber-900"><strong>Already a collaborator?</strong> Reconnect GitHub so Relaycode receives the repository permission, then retry this invite. For an organization repository, you may also need to authorize the organization’s SSO.</div>}
+      {state.status === "error" && <div className="mt-5 flex flex-wrap justify-center gap-2"><button onClick={onClose} className="rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-600">Back to projects</button><button onClick={onRetry} className="rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-700"><RefreshCw size={12} className="mr-1.5 inline" />Try again</button><button onClick={beginGithubLogin} className="flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white"><Github size={13} /> Reconnect GitHub</button></div>}
+      {readOnly && <div className="mt-5 flex justify-center gap-2"><button onClick={beginGithubLogin} className="flex items-center gap-2 rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-700"><Github size={13} /> Reconnect GitHub</button><button onClick={onClose} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Continue read-only</button></div>}
     </div>
   </Modal>;
 }

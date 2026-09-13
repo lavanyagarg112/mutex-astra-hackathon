@@ -1,8 +1,9 @@
 import { Router } from "express";
-import { activeStatuses, CreateProjectSchema, CreateRefinementSchema, CreateRequestSchema, ProjectSettingsSchema, RollbackTaskSchema, TaskControlSchema } from "@relaycode/shared";
+import { activeStatuses, CreateProjectSchema, CreateRefinementSchema, CreateRequestSchema, CreateTeamMessageSchema, InitializeRepositorySchema, ProjectSettingsSchema, RollbackTaskSchema, TaskControlSchema } from "@relaycode/shared";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { PrismaClient, TaskStatus } from "@prisma/client";
 import { z } from "zod";
+import { recordActivity } from "./activity.js";
 import { createAuthMiddleware, hashToken, HttpError, safeEqual, type AuthenticatedRequest, requireMember, routeError } from "./auth.js";
 import { githubTokenFor } from "./auth-routes.js";
 import { getGitHubRepository, inferGitHubRepositoryCommands, listGitHubRepositories } from "./github.js";
@@ -11,7 +12,8 @@ import type { BrowserPresence } from "./presence.js";
 import { queueDisplayOrder } from "./queue.js";
 import { RuntimeState } from "./runtime.js";
 import { Scheduler } from "./scheduler.js";
-import { fullTaskInclude, serializeActivity, serializeProject, serializeTask, serializeUser } from "./serialize.js";
+import { fullTaskInclude, serializeActivity, serializeMessage, serializeProject, serializeTask, serializeUser } from "./serialize.js";
+import { createTeamMessage } from "./team-chat.js";
 
 const ExtendedProjectSettingsSchema = ProjectSettingsSchema;
 const ProcessControlSchema = z.object({ name: z.enum(["install", "frontend", "backend", "test", "preview"]), cwd: z.string().optional() });
@@ -106,8 +108,14 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
       const projectId = pathParam(req, "projectId");
       await requireMember(prisma, projectId, req.userId!);
       const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
-      const [tasks, members, activities, rollbackActions] = await Promise.all([
+      const [tasks, messages, members, activities, rollbackActions] = await Promise.all([
         prisma.task.findMany({ where: { projectId: project.id }, include: fullTaskInclude }),
+        prisma.message.findMany({
+          where: { projectId: project.id, rootTask: { is: null }, taskLinks: { none: {} } },
+          include: { author: true },
+          orderBy: { createdAt: "asc" },
+          take: 500,
+        }),
         prisma.projectMember.findMany({ where: { projectId: project.id }, include: { user: true }, orderBy: { createdAt: "asc" } }),
         prisma.activityEvent.findMany({ where: { projectId: project.id }, include: { user: true }, orderBy: { createdAt: "desc" }, take: 300 }),
         prisma.rollbackAction.findMany({ where: { projectId: project.id }, include: { initiatedBy: true }, orderBy: { createdAt: "desc" }, take: 30 }),
@@ -116,6 +124,7 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
       return res.json({
         project: serializeProject(project),
         tasks: ordered.map(serializeTask),
+        messages: messages.map(serializeMessage),
         activeTask: ordered.find((task) => (activeStatuses as TaskStatus[]).includes(task.status)) ? serializeTask(ordered.find((task) => (activeStatuses as TaskStatus[]).includes(task.status))!) : null,
         queue: ordered.filter((task) => ["QUEUED", "WAITING_FOR_REQUESTER"].includes(task.status)).map(serializeTask),
         members: members.map(({ user, role, repositoryWrite }) => ({ ...serializeUser(user), role, repositoryWrite, present: presence.isOnline(project.id, user.id), daemon: scheduler.connections.statusFor(user.id, project.id) })),
@@ -178,8 +187,12 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
       const user = await prisma.user.findUniqueOrThrow({ where: { id: req.userId! }, select: { githubToken: true } });
       if (!user.githubToken) throw new HttpError(403, `Connect GitHub to prove that you have access to ${project.repositoryOwner}/${project.repositoryName}.`);
       const repository = await getGitHubRepository(githubTokenFor(user), project.repositoryOwner, project.repositoryName);
-      if (!repository.canWrite) throw new HttpError(403, `You cannot join this project because your GitHub account does not have write access to ${repository.fullName}. Ask a repository administrator to grant access, then try again.`);
-      const membership = await prisma.projectMember.create({ data: { projectId, userId: req.userId!, role: "MEMBER", repositoryWrite: true } });
+      if (!repository.canRead) throw new HttpError(403, `You cannot join this project because your GitHub account does not have read access to ${repository.fullName}. Ask a repository administrator to grant access, then try again.`);
+      // Read access is enough to collaborate and view a project. Mutating queue
+      // actions remain protected by requireMember(..., { write: true }).
+      const membership = await prisma.projectMember.create({
+        data: { projectId, userId: req.userId!, role: "MEMBER", repositoryWrite: repository.canWrite },
+      });
       io.to(`project:${project.id}:web`).emit("MEMBER_STATUS_CHANGED", { projectId: project.id, userId: req.userId!, online: scheduler.connections.isOnline(req.userId!) });
       return res.status(201).json({ project: serializeProject(project), membership: { role: membership.role, repositoryWrite: membership.repositoryWrite } });
     } catch (error) { return routeError(res, error); }
@@ -198,6 +211,21 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
   router.post("/requests", async (req: AuthenticatedRequest, res) => {
     try { return res.status(201).json(await scheduler.createRequest(req.userId!, ...requestArgs(CreateRequestSchema.parse(req.body)))); }
     catch (error) { return routeError(res, error); }
+  });
+  router.post("/projects/:projectId/messages", async (req: AuthenticatedRequest, res) => {
+    try {
+      const payload = CreateTeamMessageSchema.parse({ ...req.body, projectId: pathParam(req, "projectId") });
+      const message = await createTeamMessage(prisma, payload, req.userId!);
+      io.to(`project:${payload.projectId}:web`).emit("MESSAGE_CREATED", { projectId: payload.projectId, messageId: message.id });
+      await recordActivity(prisma, io, { projectId: payload.projectId, userId: req.userId!, category: "CHAT", message: "sent a team message" });
+      return res.status(201).json(serializeMessage(message));
+    } catch (error) { return routeError(res, error); }
+  });
+  router.post("/projects/:projectId/initialize", async (req: AuthenticatedRequest, res) => {
+    try {
+      const payload = InitializeRepositorySchema.parse({ ...req.body, projectId: pathParam(req, "projectId") });
+      return res.status(201).json(await scheduler.createInitialization(req.userId!, payload));
+    } catch (error) { return routeError(res, error); }
   });
   router.post("/refinements", async (req: AuthenticatedRequest, res) => {
     try {

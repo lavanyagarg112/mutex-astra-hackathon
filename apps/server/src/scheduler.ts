@@ -1,8 +1,10 @@
 import type { PrismaClient, TaskStatus } from "@prisma/client";
-import { activeStatuses, QUEUE_PRIORITY, type StartRollbackPayload } from "@relaycode/shared";
+import { activeStatuses, QUEUE_PRIORITY, type RepositoryInitialization, type StartRollbackPayload } from "@relaycode/shared";
 import { recordActivity } from "./activity.js";
 import { HttpError, requireMember } from "./auth.js";
+import { githubTokenFor } from "./auth-routes.js";
 import { ConservativeCoordinator, type CoordinatorAgent } from "./coordinator.js";
+import { inferGitHubRepositoryCommands } from "./github.js";
 import { ConnectionRegistry, type RelayServer, type RelaySocket } from "./realtime.js";
 import { fullTaskInclude, serializeProject, serializeTask } from "./serialize.js";
 
@@ -44,6 +46,30 @@ export class Scheduler {
     }
     const task = await this.createQueuedTask(userId, projectId, body, "NORMAL", null);
     void this.schedule(projectId);
+    return task;
+  }
+
+  async createInitialization(userId: string, payload: RepositoryInitialization & { projectId: string }) {
+    await requireMember(this.prisma, payload.projectId, userId, { write: true });
+    const activeInitialization = await this.prisma.task.findFirst({
+      where: { projectId: payload.projectId, executionMode: "INITIALIZATION", status: { in: [...ACTIVE, "QUEUED", "WAITING_FOR_REQUESTER"] } },
+    });
+    if (activeInitialization) throw new HttpError(409, "Repository initialization is already queued or running.");
+
+    const initializationConfig: RepositoryInitialization = {
+      frontend: payload.frontend,
+      backend: payload.backend,
+      database: payload.database,
+    };
+    const task = await this.createQueuedTask(
+      userId,
+      payload.projectId,
+      initializationPrompt(initializationConfig),
+      "NORMAL",
+      null,
+      { executionMode: "INITIALIZATION", initializationConfig },
+    );
+    void this.schedule(payload.projectId);
     return task;
   }
 
@@ -138,6 +164,9 @@ export class Scheduler {
       this.taskUpdated(task.projectId, task.id);
       this.io.to(`project:${task.projectId}:web`).emit("DIFF_AVAILABLE", { projectId: task.projectId, taskId: task.id });
       const project = await this.prisma.project.findUniqueOrThrow({ where: { id: task.projectId } });
+      if (task.executionMode === "INITIALIZATION") {
+        await this.refreshCommandsAfterInitialization(project, task.requestedByUserId, task.id);
+      }
       this.connections.syncAllProjectMembers(task.projectId, { projectId: task.projectId, repositoryUrl: project.repositoryUrl, branch: project.branch });
       await recordActivity(this.prisma, this.io, { projectId: task.projectId, taskId: task.id, category: "TASK", message: `#${task.number} complete — accepted automatically` });
       void this.schedule(task.projectId);
@@ -268,7 +297,14 @@ export class Scheduler {
     void this.schedule(payload.projectId);
   }
 
-  private async createQueuedTask(userId: string, projectId: string, body: string, type: "NORMAL" | "REFINEMENT", parentTaskId: string | null) {
+  private async createQueuedTask(
+    userId: string,
+    projectId: string,
+    body: string,
+    type: "NORMAL" | "REFINEMENT",
+    parentTaskId: string | null,
+    options: { executionMode?: "NORMAL" | "INITIALIZATION"; initializationConfig?: RepositoryInitialization } = {},
+  ) {
     const task = await this.prisma.$transaction(async (tx) => {
       const counters = await tx.project.update({ where: { id: projectId }, data: { nextTaskNumber: { increment: 1 }, nextQueueSequence: { increment: 1 } } });
       const message = await tx.message.create({ data: { projectId, authorId: userId, body, ...(parentTaskId ? { replyToMessageId: (await tx.task.findUniqueOrThrow({ where: { id: parentTaskId } })).rootMessageId } : {}) } });
@@ -279,6 +315,8 @@ export class Scheduler {
           rootMessageId: message.id,
           parentTaskId,
           type,
+          executionMode: options.executionMode ?? "NORMAL",
+          ...(options.initializationConfig ? { initializationConfig: options.initializationConfig } : {}),
           queuePriority: type === "REFINEMENT" ? QUEUE_PRIORITY.REFINEMENT : QUEUE_PRIORITY.NORMAL,
           queueSequence: counters.nextQueueSequence - 1,
           requestedByUserId: userId,
@@ -332,9 +370,21 @@ export class Scheduler {
       if (!claimed.count) continue;
       const refreshed = await this.prisma.task.findUniqueOrThrow({ where: { id: task.id }, include: fullTaskInclude });
       const refinements = refreshed.taskMessages.filter((link) => link.messageId !== refreshed.rootMessageId).map((link) => link.message.body);
+      const serializedProject = serializeProject(project);
+      // Companions released before executionMode existed still insist on a test
+      // command for every task. Give only those initialization dispatches a
+      // portable no-op command. New companions see executionMode and skip the
+      // validation stages entirely; the stored project settings are untouched.
+      const dispatchedProject = refreshed.executionMode === "INITIALIZATION"
+        ? {
+            ...serializedProject,
+            testCommand: `node -e "process.exit(0)"`,
+            toolPermissions: { ...serializedProject.toolPermissions as Record<string, boolean>, tests: true },
+          }
+        : serializedProject;
       const emitted = this.connections.emitToEligible(task.requestedByUserId, projectId, "START_TASK", {
         task: serializeTask(refreshed) as any,
-        project: serializeProject(project) as any,
+        project: dispatchedProject as any,
         request: refreshed.rootMessage.body,
         refinements,
         ...(project.agentCredential ? { agentCredential: project.agentCredential } : {}),
@@ -353,6 +403,47 @@ export class Scheduler {
   private async nextSequence(projectId: string) {
     const project = await this.prisma.project.update({ where: { id: projectId }, data: { nextQueueSequence: { increment: 1 } } });
     return project.nextQueueSequence - 1;
+  }
+
+  private async refreshCommandsAfterInitialization(
+    project: { id: string; repositoryOwner: string; repositoryName: string; branch: string; agentCredential: string | null; coordinatorModel: string },
+    userId: string,
+    taskId: string,
+  ) {
+    try {
+      const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { githubToken: true } });
+      const commands = await inferGitHubRepositoryCommands(
+        githubTokenFor(user),
+        project.repositoryOwner,
+        project.repositoryName,
+        project.branch,
+        project.agentCredential ? { credential: project.agentCredential, model: project.coordinatorModel } : undefined,
+      );
+      await this.prisma.project.update({ where: { id: project.id }, data: {
+        installCommand: commands.installCommand,
+        frontendCommand: commands.frontendCommand,
+        backendCommand: commands.backendCommand,
+        testCommand: commands.testCommand,
+      } });
+      await recordActivity(this.prisma, this.io, {
+        projectId: project.id,
+        taskId,
+        userId,
+        category: "SETTINGS",
+        message: commands.testCommand
+          ? "setup commands detected from initialized repository"
+          : "setup commands detected; no validation command was found, so configure one before the next coding request",
+      });
+      this.queueUpdated(project.id);
+    } catch (error) {
+      await recordActivity(this.prisma, this.io, {
+        projectId: project.id,
+        taskId,
+        userId,
+        category: "SETTINGS",
+        message: `repository initialized, but automatic command detection failed: ${error instanceof Error ? error.message : "unknown error"}`,
+      });
+    }
   }
 
   private daemonUser(socket: RelaySocket) {
@@ -393,4 +484,23 @@ export class Scheduler {
       if (this.projectLocks.get(projectId) === queued) this.projectLocks.delete(projectId);
     });
   }
+}
+
+function initializationPrompt(config: RepositoryInitialization) {
+  const labels: Record<string, string> = {
+    REACT: "React", NEXT_JS: "Next.js", VUE: "Vue", SVELTE: "Svelte",
+    EXPRESS: "Express", FASTIFY: "Fastify", NEST_JS: "NestJS", FASTAPI: "FastAPI", DJANGO: "Django",
+    POSTGRESQL: "PostgreSQL", MYSQL: "MySQL", SQLITE: "SQLite", MONGODB: "MongoDB", NONE: "none",
+  };
+  const label = (value: string) => labels[value] ?? value;
+  return [
+    "Initialize or complete the setup of this repository as a runnable application.",
+    `Frontend: ${label(config.frontend)}.`,
+    `Backend: ${label(config.backend)}.`,
+    `Database: ${label(config.database)}.`,
+    "Inspect the repository before changing it. If an application already exists, preserve its architecture and working features; add or repair only the missing dependency manifests, scripts, environment example, database setup, and documentation needed for the selected stack.",
+    "Only scaffold a new application when the repository does not already contain one.",
+    "Provide root-level package scripts or documented commands for installation, frontend development, backend development, and validation. The validation command must be non-interactive and usable by later agent tasks.",
+    "This is a repository setup task, so no pre-existing validation command is required and the current repository is not baseline-validated before editing.",
+  ].join("\n");
 }
