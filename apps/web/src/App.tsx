@@ -191,13 +191,19 @@ function Workspace() {
   const [joinState, setJoinState] = useState<JoinState | null>(null);
   const [joinAttempt, setJoinAttempt] = useState(0);
   const [pairingState, setPairingState] = useState<PairingState | null>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const selectedProjectRef = useRef(projectId);
   selectedProjectRef.current = projectId;
 
   const constrainRightPanelWidth = (width: number) => {
-    const available = window.innerWidth - (sidebarCollapsed ? 72 : 248) - 560;
-    return Math.max(320, Math.min(720, available, width));
+    // Keep only a slim section of the conversation visible so the divider is
+    // always easy to find and drag back, while letting the inspector use the
+    // rest of the workspace for previews, files, and history.
+    const workspaceWidth = workspaceRef.current?.clientWidth
+      ?? window.innerWidth - (sidebarCollapsed ? 72 : window.innerWidth >= 1536 ? 270 : 248);
+    const available = workspaceWidth - 120;
+    return Math.max(320, Math.min(available, width));
   };
 
   useEffect(() => window.localStorage.setItem("relaycode.sidebarCollapsed", String(sidebarCollapsed)), [sidebarCollapsed]);
@@ -401,7 +407,7 @@ function Workspace() {
             onProjectSettings={() => setModal("project")} onShare={() => setModal("share")}
           />
 
-          <div className="workspace-columns grid min-h-0 flex-1 grid-cols-1" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties}>
+          <div ref={workspaceRef} className="workspace-columns grid min-h-0 flex-1 grid-cols-1" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties}>
             <section className="relative flex min-h-[700px] min-w-0 flex-col border-r border-zinc-200/80 lg:min-h-0">
               <QueueHeader pendingCount={pending.length} />
               <div className="fine-scrollbar flex-1 overflow-y-auto px-4 pb-44 pt-2 sm:px-6 lg:px-8">
