@@ -95,7 +95,14 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
           lastMessage: lastMessage ? { body: lastMessage.body, createdAt: lastMessage.createdAt.toISOString(), authorName: lastMessage.author.name } : null,
         };
       }));
-      return res.json({ user: serializeUser(user), projects });
+      return res.json({
+        user: serializeUser(user),
+        projects,
+        authorisation: {
+          companionAuthorised: Boolean(user.daemonTokenHash),
+          companionOnline: scheduler.connections.isOnline(user.id),
+        },
+      });
     } catch (error) { return routeError(res, error); }
   });
 
@@ -106,7 +113,7 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
       return res.json({
         user: serializeUser(user),
         github: { username: user.githubLogin ?? user.username, connected: Boolean(user.githubId && user.githubToken) },
-        localCompanion: { online: scheduler.connections.isOnline(user.id), gitCredentialConfigured: scheduler.connections.isOnline(user.id) },
+        localCompanion: { authorised: Boolean(user.daemonTokenHash), online: scheduler.connections.isOnline(user.id), gitCredentialConfigured: scheduler.connections.isOnline(user.id) },
         mappings: memberships.map(({ project }) => ({ projectId: project.id, projectName: project.name, ...scheduler.connections.statusFor(user.id, project.id) })),
       });
     } catch (error) { return routeError(res, error); }
@@ -150,7 +157,8 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
     try {
       const payload = CreateProjectSchema.parse(req.body);
       const repository = parseRepository(payload.repositoryUrl);
-      const user = await prisma.user.findUniqueOrThrow({ where: { id: req.userId! }, select: { githubToken: true } });
+      const user = await prisma.user.findUniqueOrThrow({ where: { id: req.userId! }, select: { githubToken: true, daemonTokenHash: true } });
+      if (!user.daemonTokenHash) throw new HttpError(409, "Authorise the local Companion before creating a project.");
       let inferredCommands: Awaited<ReturnType<typeof inferGitHubRepositoryCommands>> | null = null;
       if (user.githubToken) {
         const githubToken = githubTokenFor(user);

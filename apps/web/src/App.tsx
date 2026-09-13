@@ -191,6 +191,7 @@ function Workspace() {
   const [joinState, setJoinState] = useState<JoinState | null>(null);
   const [joinAttempt, setJoinAttempt] = useState(0);
   const [pairingState, setPairingState] = useState<PairingState | null>(null);
+  const [companionAuthorised, setCompanionAuthorised] = useState(false);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const selectedProjectRef = useRef(projectId);
@@ -263,7 +264,7 @@ function Workspace() {
 
   useEffect(() => {
     let mounted = true;
-    api<{ projects: Array<Project & Partial<ProjectItem>>; user?: User }>("/api/bootstrap")
+    api<{ projects: Array<Project & Partial<ProjectItem>>; user?: User; authorisation?: { companionAuthorised?: boolean } }>("/api/bootstrap")
       .then((payload) => {
         if (!mounted) return;
         const list = (payload.projects ?? []).map(normalizeProject);
@@ -271,6 +272,7 @@ function Workspace() {
         if (list.length) setProjectId((current) => current && list.some((project) => project.id === current) ? current : list[0]!.id);
         else { setProjectId(""); setData(null); }
         if (payload.user) setCurrentUser(payload.user);
+        setCompanionAuthorised(Boolean(payload.authorisation?.companionAuthorised));
         setServerMode("live");
       })
       .catch(() => mounted && setServerMode("connecting"));
@@ -330,16 +332,37 @@ function Workspace() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joinAttempt]);
 
+  const startCompanionAuthorisation = async () => {
+    setPairingState({ status: "pairing" });
+    try {
+      const { code } = await api<{ code: string; expiresAt: string }>("/api/companion/pair/start", { method: "POST" });
+      setPairingState({ status: "ready", code });
+      window.location.assign(companionDeepLink(code));
+    } catch (reason) {
+      setPairingState({ status: "error", message: reason instanceof Error ? reason.message : "Could not authorise this Companion." });
+    }
+  };
+
   useEffect(() => {
     if (window.location.pathname !== "/companion/connect") return;
-    setPairingState({ status: "pairing" });
-    void api<{ code: string; expiresAt: string }>("/api/companion/pair/start", { method: "POST" })
-      .then(({ code }) => {
-        setPairingState({ status: "ready", code });
-        window.location.assign(companionDeepLink(code));
-      })
-      .catch((reason: unknown) => setPairingState({ status: "error", message: reason instanceof Error ? reason.message : "Could not pair this companion." }));
+    void startCompanionAuthorisation();
+    // This route is handled once when the app opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (pairingState?.status !== "ready" || companionAuthorised) return;
+    const check = () => void api<{ localCompanion: { authorised?: boolean } }>("/api/users/me/settings").then((payload) => {
+      if (!payload.localCompanion.authorised) return;
+      setCompanionAuthorised(true);
+      setPairingState(null);
+      if (window.location.pathname === "/companion/connect") window.history.replaceState({}, "", "/");
+      toast("Companion authorised. You can now create a project.");
+    }).catch(() => undefined);
+    check();
+    const interval = window.setInterval(check, 1_500);
+    return () => window.clearInterval(interval);
+  }, [pairingState?.status, companionAuthorised]);
 
   // A queued request absorbed into an amendable active task remains in the
   // database for audit history, but is rendered once as a reply on that task.
@@ -373,16 +396,16 @@ function Workspace() {
 
   if (!projectId) {
     return <div className="flex min-h-screen bg-white text-ink">
-      <ProjectSidebar projects={projects} user={currentUser} selectedId="" open={mobileNav} collapsed={sidebarCollapsed} onToggleCollapsed={() => setSidebarCollapsed((value) => !value)} onClose={() => setMobileNav(false)} onSelect={chooseProject} onCreateProject={() => setModal("createProject")} onUserSettings={() => setModal("user")} />
+      <ProjectSidebar projects={projects} user={currentUser} authorised={companionAuthorised} selectedId="" open={mobileNav} collapsed={sidebarCollapsed} onToggleCollapsed={() => setSidebarCollapsed((value) => !value)} onClose={() => setMobileNav(false)} onSelect={chooseProject} onCreateProject={() => setModal("createProject")} onUserSettings={() => setModal("user")} />
       <main className="grid min-w-0 flex-1 place-items-center px-6">
         <div className="max-w-md text-center">
           <div className="mx-auto grid size-12 place-items-center rounded-2xl bg-zinc-950 text-white"><FolderGit2 size={20} /></div>
-          <h1 className="mt-5 text-2xl font-semibold tracking-tight">Create your first project</h1>
-          <p className="mt-2 text-sm leading-6 text-zinc-500">Choose a GitHub repository you can write to. Mutex will create the shared request queue, then your Companion can clone it or connect an existing folder.</p>
-          <button onClick={() => setModal("createProject")} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-3 text-xs font-medium text-white"><Plus size={14} /> Create project</button>
+          <h1 className="mt-5 text-2xl font-semibold tracking-tight">{companionAuthorised ? "Create your first project" : "Authorise this computer"}</h1>
+          <p className="mt-2 text-sm leading-6 text-zinc-500">{companionAuthorised ? "Choose a GitHub repository you can write to. Mutex will create the shared request queue, then your Companion can clone it or connect an existing folder." : "Authorise Mutex Companion before choosing a repository or creating a project."}</p>
+          <button onClick={() => setModal("createProject")} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-3 text-xs font-medium text-white">{companionAuthorised ? <Plus size={14} /> : <ShieldCheck size={14} />}{companionAuthorised ? "Create project" : "Start authorisation"}</button>
         </div>
       </main>
-      {modal === "createProject" && <CreateProjectModal user={currentUser} onClose={() => setModal(null)} onCreated={(project) => { const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 }); setProjects([normalized]); setProjectId(project.id); setModal(null); }} />}
+      {modal === "createProject" && <CreateProjectModal user={currentUser} authorised={companionAuthorised} onAuthorise={() => void startCompanionAuthorisation()} onClose={() => setModal(null)} onCreated={(project) => { const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 }); setProjects([normalized]); setProjectId(project.id); setModal(null); }} />}
       {modal === "user" && <UserSettingsModal projects={projects} user={currentUser} socket={socket} onClose={() => setModal(null)} onUpdated={setCurrentUser} />}
     </div>;
   }
@@ -401,7 +424,7 @@ function Workspace() {
   return (
     <div className="min-h-screen bg-white text-ink lg:h-screen lg:overflow-hidden">
       <div className="flex min-h-screen w-full overflow-hidden bg-white lg:h-screen lg:min-h-0">
-        <ProjectSidebar projects={projects} user={currentUser} companion={data.project.members.find((member) => member.id === currentUser.id)} selectedId={projectId} open={mobileNav} collapsed={sidebarCollapsed} onToggleCollapsed={() => setSidebarCollapsed((value) => !value)} onClose={() => setMobileNav(false)} onSelect={chooseProject} onCreateProject={() => setModal("createProject")} onUserSettings={() => setModal("user")} />
+        <ProjectSidebar projects={projects} user={currentUser} companion={data.project.members.find((member) => member.id === currentUser.id)} authorised={companionAuthorised} selectedId={projectId} open={mobileNav} collapsed={sidebarCollapsed} onToggleCollapsed={() => setSidebarCollapsed((value) => !value)} onClose={() => setMobileNav(false)} onSelect={chooseProject} onCreateProject={() => setModal("createProject")} onUserSettings={() => setModal("user")} />
 
         <main className="flex min-w-0 flex-1 flex-col bg-white">
           <ProjectHeader
@@ -451,7 +474,7 @@ function Workspace() {
       <PixelCrew members={data.project.members} activeTask={active} projectId={projectId} socket={socket} currentUserId={currentUser.id} />
 
       {modal === "project" && <ProjectSettingsModal project={data.project} onClose={() => setModal(null)} onInitialize={() => setModal("initialize")} onSave={(project) => { setData((current) => current ? ({ ...current, project: { ...current.project, ...project } }) : current); setModal(null); toast("Project settings saved."); }} />}
-      {modal === "createProject" && <CreateProjectModal user={currentUser} onClose={() => setModal(null)} onCreated={(project) => { const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 }); setProjects((current) => [...current, normalized]); setProjectId(project.id); setModal(null); toast("Project created. Open the companion to clone or connect the repository."); }} />}
+      {modal === "createProject" && <CreateProjectModal user={currentUser} authorised={companionAuthorised} onAuthorise={() => void startCompanionAuthorisation()} onClose={() => setModal(null)} onCreated={(project) => { const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 }); setProjects((current) => [...current, normalized]); setProjectId(project.id); setModal(null); toast("Project created. Open the Companion to clone or connect the repository."); }} />}
       {modal === "initialize" && <InitializeRepositoryModal project={data.project} onClose={() => setModal(null)} onStarted={() => { setModal(null); toast("Repository initialization queued. It will run on your companion without requiring an existing validation command."); }} />}
       {modal === "user" && <UserSettingsModal projects={projects} user={currentUser} socket={socket} onClose={() => setModal(null)} onUpdated={setCurrentUser} />}
       {modal === "share" && <ShareModal project={data.project} onClose={() => setModal(null)} toast={toast} />}
@@ -482,7 +505,7 @@ function LoginScreen() {
   </div>;
 }
 
-function ProjectSidebar({ projects, user, companion, selectedId, open, collapsed, onToggleCollapsed, onClose, onSelect, onCreateProject, onUserSettings }: { projects: ProjectItem[]; user: User; companion?: Member; selectedId: string; open: boolean; collapsed: boolean; onToggleCollapsed: () => void; onClose: () => void; onSelect: (id: string) => void; onCreateProject: () => void; onUserSettings: () => void }) {
+function ProjectSidebar({ projects, user, companion, authorised, selectedId, open, collapsed, onToggleCollapsed, onClose, onSelect, onCreateProject, onUserSettings }: { projects: ProjectItem[]; user: User; companion?: Member; authorised: boolean; selectedId: string; open: boolean; collapsed: boolean; onToggleCollapsed: () => void; onClose: () => void; onSelect: (id: string) => void; onCreateProject: () => void; onUserSettings: () => void }) {
   return <>
     {open && <button aria-label="Close project navigation" className="fixed inset-0 z-40 bg-black/20 backdrop-blur-[1px] lg:hidden" onClick={onClose} />}
     <aside className={cx("fixed inset-y-0 left-0 z-50 flex w-[276px] flex-col border-r border-zinc-200 bg-[#f7f7f5] p-3 shadow-float transition-[transform,width] duration-300 lg:static lg:z-auto lg:translate-x-0 lg:shadow-none", collapsed ? "lg:w-[72px]" : "lg:w-[248px] 2xl:w-[270px]", open ? "translate-x-0" : "-translate-x-[110%]") }>
@@ -521,9 +544,9 @@ function ProjectSidebar({ projects, user, companion, selectedId, open, collapsed
       </nav>
 
       <div className="mt-auto space-y-2 pt-6">
-        <div title={collapsed ? `Local companion: ${companion?.online ? "online" : "offline"}` : undefined} className={cx("relative rounded-xl border border-zinc-200 bg-white p-3", collapsed && "lg:grid lg:h-10 lg:place-items-center lg:p-0")}>
-          <div className="flex items-center gap-2 text-[11px] font-medium"><Laptop2 size={14} /><span className={cx(collapsed && "lg:hidden")}>Local companion</span><span className={cx("ml-auto size-2 rounded-full", collapsed && "lg:absolute lg:right-1.5 lg:top-1.5 lg:ml-0", companion?.online ? "bg-emerald-500" : "bg-zinc-300")} /></div>
-          <div className={cx("mt-1.5 text-[10px] text-zinc-400", collapsed && "lg:hidden")}>{companion?.online ? `Online · v${companion.daemonVersion ?? "unknown"}${companion.synchronized ? " · synced" : ""}` : "Offline · start the local daemon"}</div>
+        <div title={collapsed ? `Authorisation: ${authorised ? "complete" : "required"}` : undefined} className={cx("relative rounded-xl border border-zinc-200 bg-white p-3", collapsed && "lg:grid lg:h-10 lg:place-items-center lg:p-0")}>
+          <div className="flex items-center gap-2 text-[11px] font-medium"><Laptop2 size={14} /><span className={cx(collapsed && "lg:hidden")}>Authorisation</span><span className={cx("ml-auto size-2 rounded-full", collapsed && "lg:absolute lg:right-1.5 lg:top-1.5 lg:ml-0", authorised ? "bg-emerald-500" : "bg-zinc-300")} /></div>
+          <div className={cx("mt-1.5 text-[10px] text-zinc-400", collapsed && "lg:hidden")}>{authorised ? `Authorised · ${companion?.online ? `online · v${companion.daemonVersion ?? "unknown"}` : "offline"}` : "Required before creating projects"}</div>
         </div>
         <button title={collapsed ? user.name : undefined} onClick={onUserSettings} className={cx("flex w-full items-center gap-2.5 rounded-xl px-2 py-2 text-left hover:bg-zinc-200/60", collapsed && "lg:justify-center lg:px-0")}>
           <Avatar user={user} size="sm" online />
@@ -967,7 +990,7 @@ function ModalHeader({ icon, title, description, onClose }: { icon: ReactNode; t
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) { return <label className="block"><span className="text-[10px] font-semibold text-zinc-700">{label}</span>{hint && <span className="ml-2 text-[9px] text-zinc-400">{hint}</span>}<div className="mt-1.5">{children}</div></label>; }
 const fieldClass = "h-10 w-full rounded-xl border border-zinc-200 bg-white px-3 text-[11px] text-zinc-700 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-100";
 
-function CreateProjectModal({ user, onClose, onCreated }: { user: User; onClose: () => void; onCreated: (project: Project) => void }) {
+function CreateProjectModal({ user, authorised, onAuthorise, onClose, onCreated }: { user: User; authorised: boolean; onAuthorise: () => void; onClose: () => void; onCreated: (project: Project) => void }) {
   const [name, setName] = useState("");
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [branch, setBranch] = useState("main");
@@ -977,6 +1000,7 @@ function CreateProjectModal({ user, onClose, onCreated }: { user: User; onClose:
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   useEffect(() => {
+    if (!authorised) return;
     void api<{ repositories?: Array<GithubRepository & { full_name?: string; clone_url?: string; default_branch?: string; permissions?: { push?: boolean } }> }>("/api/github/repositories")
       .then((payload) => {
         const normalized = (payload.repositories ?? []).map((repository) => ({
@@ -993,7 +1017,7 @@ function CreateProjectModal({ user, onClose, onCreated }: { user: User; onClose:
         setError(reason instanceof Error ? reason.message : "GitHub repositories could not be loaded. Reconnect GitHub and try again.");
       })
       .finally(() => setLoadingRepositories(false));
-  }, []);
+  }, [authorised]);
   const chooseRepository = (value: string) => {
     const repository = repositories.find((item) => item.fullName === value);
     if (!repository) return;
@@ -1008,6 +1032,18 @@ function CreateProjectModal({ user, onClose, onCreated }: { user: User; onClose:
       onCreated(result.project);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not create project"); setSaving(false); }
   };
+  if (!authorised) {
+    const platform = /windows/i.test(navigator.userAgent) ? "win32" : /linux|x11/i.test(navigator.userAgent) ? "linux" : "darwin";
+    const platformLabel = platform === "win32" ? "Windows" : platform === "linux" ? "Linux" : "macOS";
+    return <Modal onClose={onClose} width="max-w-md">
+      <ModalHeader icon={<ShieldCheck size={16} />} title="Authorisation required" description="Authorise this computer before creating a project." onClose={onClose} />
+      <div className="p-5 sm:p-6">
+        <p className="text-[11px] leading-5 text-zinc-600">Mutex runs repository and Git operations through the Companion on your computer. This one-time authorisation securely links it to your account.</p>
+        <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-[9px] leading-4 text-zinc-500">Install or open Mutex Companion, then authorise it. Repository selection and local-folder setup follow after the project is created.</div>
+        <div className="mt-5 flex items-center justify-end gap-2"><a href={`${API_URL}/api/companion/download?platform=${platform}`} className="rounded-xl border border-zinc-200 px-4 py-2.5 text-[10px] font-medium text-zinc-600 hover:bg-zinc-50">Download for {platformLabel}</a><button onClick={onAuthorise} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Authorise Companion</button></div>
+      </div>
+    </Modal>;
+  }
   return <Modal onClose={onClose} width="max-w-lg"><ModalHeader icon={<FolderGit2 size={16} />} title="Create project" description="Choose a GitHub repository you can write to." onClose={onClose} />
     <form onSubmit={submit}><div className="space-y-4 p-5 sm:p-6">
       {!manualEntry && <Field label="GitHub repository" hint="Only repositories with write access are shown"><div className="relative"><Github size={13} className="absolute left-3 top-3.5 text-zinc-400" /><select disabled={loadingRepositories} value={repositories.find((repository) => repository.cloneUrl === repositoryUrl)?.fullName ?? ""} onChange={(event) => chooseRepository(event.target.value)} className={cx(fieldClass, "pl-9")}><option value="">{loadingRepositories ? "Loading repositories…" : "Choose a repository"}</option>{repositories.map((repository) => <option key={repository.id} value={repository.fullName}>{repository.fullName}{repository.private ? " · private" : ""}</option>)}</select></div></Field>}
@@ -1121,9 +1157,7 @@ function InitializeRepositoryModal({ project, onClose, onStarted }: { project: P
 }
 
 function UserSettingsModal({ projects, user, socket, onClose, onUpdated }: { projects: ProjectItem[]; user: User; socket: AppSocket | null; onClose: () => void; onUpdated: (user: User) => void }) {
-  const [settings, setSettings] = useState<{ online: boolean; version?: string; mappings: Record<string, string> }>({ online: false, mappings: {} });
-  const [companionMessage, setCompanionMessage] = useState("");
-  const [pairingCode, setPairingCode] = useState("");
+  const [settings, setSettings] = useState<{ authorised: boolean; online: boolean; version?: string; mappings: Record<string, string> }>({ authorised: false, online: false, mappings: {} });
   const detectedPlatform = /windows/i.test(navigator.userAgent) ? "win32" : /linux|x11/i.test(navigator.userAgent) ? "linux" : "darwin";
   const platformLabel = detectedPlatform === "win32" ? "Windows" : detectedPlatform === "linux" ? "Linux" : "macOS";
   const companionDownloads = [{ platform: "darwin", label: "macOS" }, { platform: "win32", label: "Windows" }, { platform: "linux", label: "Linux" }];
@@ -1132,19 +1166,12 @@ function UserSettingsModal({ projects, user, socket, onClose, onUpdated }: { pro
     onUpdated({ ...user, pixelCharacter: skinId });
   };
   useEffect(() => {
-    void api<{ localCompanion: { online: boolean }; mappings: Array<{ projectId: string; path?: string | null; version?: string | null }> }>("/api/users/me/settings").then((payload) => {
-      setSettings((current) => ({ ...current, online: payload.localCompanion.online, version: payload.mappings.find((item) => item.version)?.version ?? undefined, mappings: Object.fromEntries(payload.mappings.filter((item) => item.path).map((item) => [item.projectId, item.path!])) }));
+    void api<{ localCompanion: { authorised?: boolean; online: boolean }; mappings: Array<{ projectId: string; path?: string | null; version?: string | null }> }>("/api/users/me/settings").then((payload) => {
+      setSettings((current) => ({ ...current, authorised: Boolean(payload.localCompanion.authorised), online: payload.localCompanion.online, version: payload.mappings.find((item) => item.version)?.version ?? undefined, mappings: Object.fromEntries(payload.mappings.filter((item) => item.path).map((item) => [item.projectId, item.path!])) }));
     }).catch(() => undefined);
   }, []);
-  const connectProject = async (project: ProjectItem) => {
-    setCompanionMessage("");
-    try {
-      const result = await api<{ code: string; expiresAt: string }>("/api/companion/pair/start", { method: "POST" });
-      setPairingCode(result.code);
-      window.location.assign(companionDeepLink(result.code));
-    } catch {
-      setCompanionMessage("Install or open Mutex Companion, then try again.");
-    }
+  const authoriseCompanion = () => {
+    window.location.assign("/companion/connect");
   };
   return <Modal onClose={onClose} width="max-w-2xl"><ModalHeader icon={<UserRound size={16} />} title="Personal settings" description="Your Git identity and local companion stay private to this machine." onClose={onClose} />
     <div className="space-y-6 p-5 sm:p-6">
@@ -1163,8 +1190,8 @@ function UserSettingsModal({ projects, user, socket, onClose, onUpdated }: { pro
         </div>
       </section>
       <section><div className="mb-2 text-[9px] font-semibold uppercase tracking-[.13em] text-zinc-400">Git identity</div><div className="rounded-xl border border-zinc-200 p-4"><div className="flex items-center gap-3"><div className="grid size-9 place-items-center rounded-full bg-zinc-950 text-white"><Github size={17} /></div><div><div className="text-[11px] font-semibold">@{user.username}</div><div className="mt-0.5 text-[9px] text-zinc-400">Commit identity comes from your local Git configuration</div></div><span className="ml-auto text-[9px] font-medium text-zinc-500">Kept local</span></div><div className="mt-3 flex items-center justify-between border-t border-zinc-100 pt-3 text-[9px] text-zinc-400"><span>Credentials never pass through the browser or activity logs.</span><button onClick={() => void logout()} className="font-medium text-red-600 hover:underline">Log out</button></div></div></section>
-      <section><div className="mb-2 text-[9px] font-semibold uppercase tracking-[.13em] text-zinc-400">Local companion</div><div className="rounded-xl border border-zinc-200 p-4"><div className="flex items-center gap-3"><div className={cx("grid size-9 place-items-center rounded-xl", settings.online ? "bg-emerald-50 text-emerald-700" : "bg-zinc-100 text-zinc-500")}><Laptop2 size={17} /></div><div className="min-w-0 flex-1"><div className="flex items-center gap-2 text-[11px] font-semibold">This machine <span className={cx("size-1.5 rounded-full", settings.online ? "bg-emerald-500" : "bg-zinc-300")} /></div><div className="mt-0.5 text-[9px] text-zinc-400">{settings.online ? `Online${settings.version ? ` · companion v${settings.version}` : ""}` : "Companion not connected"}</div></div>{!settings.online && <a href={`${API_URL}/api/companion/download?platform=${detectedPlatform}`} className="flex items-center gap-1.5 rounded-lg bg-zinc-950 px-3 py-2 text-[9px] font-medium text-white"><ArrowDown size={11} /> Download for {platformLabel}</a>}</div><div className="mt-3 flex items-center gap-2 border-t border-zinc-100 pt-3"><span className="mr-auto text-[9px] text-zinc-400">Also available for</span>{companionDownloads.map((download) => <a key={download.platform} href={`${API_URL}/api/companion/download?platform=${download.platform}`} className={cx("rounded-md px-2 py-1 text-[9px] font-medium", download.platform === detectedPlatform ? "bg-zinc-100 text-zinc-500" : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800")}>{download.label}</a>)}</div></div>{pairingCode && <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-[9px] text-emerald-900">Opening the companion… If it does not open, enter pairing code <strong className="ml-1 font-mono tracking-wider">{pairingCode}</strong>.</div>}{companionMessage && <p className="mt-2 text-[9px] text-amber-700">{companionMessage}</p>}</section>
-      <section><div className="mb-2 flex items-center justify-between"><span className="text-[9px] font-semibold uppercase tracking-[.13em] text-zinc-400">Repositories on this machine</span><span className="text-[9px] text-zinc-400">No terminal required</span></div><div className="divide-y divide-zinc-100 rounded-xl border border-zinc-200 px-4">{projects.map((project) => <div key={project.id} className="flex items-center gap-3 py-3"><FolderGit2 size={15} className="text-zinc-400" /><div className="min-w-0 flex-1"><div className="text-[10px] font-semibold">{project.name}</div><div className="mt-1 truncate font-mono text-[9px] text-zinc-400">{settings.mappings[project.id] ?? `${project.repositoryOwner}/${project.repositoryName}`}</div></div>{settings.mappings[project.id] ? <span className="flex items-center gap-1 text-[9px] font-medium text-emerald-700"><Check size={11} /> Ready</span> : <button onClick={() => void connectProject(project)} className="rounded-lg border border-zinc-200 px-2.5 py-1.5 text-[9px] font-medium hover:bg-zinc-50">Clone or choose folder</button>}</div>)}</div></section>
+      <section><div className="mb-2 text-[9px] font-semibold uppercase tracking-[.13em] text-zinc-400">Authorisation</div><div className="rounded-xl border border-zinc-200 p-4"><div className="flex items-center gap-3"><div className={cx("grid size-9 place-items-center rounded-xl", settings.authorised ? "bg-emerald-50 text-emerald-700" : "bg-zinc-100 text-zinc-500")}><Laptop2 size={17} /></div><div className="min-w-0 flex-1"><div className="flex items-center gap-2 text-[11px] font-semibold">Mutex Companion <span className={cx("size-1.5 rounded-full", settings.online ? "bg-emerald-500" : "bg-zinc-300")} /></div><div className="mt-0.5 text-[9px] text-zinc-400">{settings.authorised ? `Authorised${settings.online ? " · online" : " · offline"}${settings.version ? ` · v${settings.version}` : ""}` : "Authorisation required before creating a project"}</div></div>{!settings.authorised && <button onClick={authoriseCompanion} className="rounded-lg bg-zinc-950 px-3 py-2 text-[9px] font-medium text-white">Authorise</button>}{!settings.online && <a href={`${API_URL}/api/companion/download?platform=${detectedPlatform}`} className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-[9px] font-medium text-zinc-600"><ArrowDown size={11} /> Download</a>}</div><div className="mt-3 flex items-center gap-2 border-t border-zinc-100 pt-3"><span className="mr-auto text-[9px] text-zinc-400">Also available for</span>{companionDownloads.map((download) => <a key={download.platform} href={`${API_URL}/api/companion/download?platform=${download.platform}`} className={cx("rounded-md px-2 py-1 text-[9px] font-medium", download.platform === detectedPlatform ? "bg-zinc-100 text-zinc-500" : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800")}>{download.label}</a>)}</div></div></section>
+      <section><div className="mb-2 flex items-center justify-between"><span className="text-[9px] font-semibold uppercase tracking-[.13em] text-zinc-400">Repositories on this machine</span><span className="text-[9px] text-zinc-400">No terminal required</span></div><div className="divide-y divide-zinc-100 rounded-xl border border-zinc-200 px-4">{projects.map((project) => <div key={project.id} className="flex items-center gap-3 py-3"><FolderGit2 size={15} className="text-zinc-400" /><div className="min-w-0 flex-1"><div className="text-[10px] font-semibold">{project.name}</div><div className="mt-1 truncate font-mono text-[9px] text-zinc-400">{settings.mappings[project.id] ?? `${project.repositoryOwner}/${project.repositoryName}`}</div></div>{settings.mappings[project.id] ? <span className="flex items-center gap-1 text-[9px] font-medium text-emerald-700"><Check size={11} /> Ready</span> : <button onClick={authoriseCompanion} className="rounded-lg border border-zinc-200 px-2.5 py-1.5 text-[9px] font-medium hover:bg-zinc-50">Clone or choose folder</button>}</div>)}</div></section>
     </div><div className="flex justify-end border-t border-zinc-100 px-6 py-4"><button onClick={onClose} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Done</button></div>
   </Modal>;
 }
@@ -1193,7 +1220,7 @@ function JoinProjectStatus({ state, onClose, onRetry }: { state: JoinState; onCl
 
 function CompanionConnectStatus({ state, onClose }: { state: PairingState; onClose: () => void }) {
   const code = state.code;
-  return <Modal onClose={state.status === "pairing" ? () => undefined : onClose} width="max-w-md"><div className="p-7 text-center"><div className={cx("mx-auto grid size-11 place-items-center rounded-xl", state.status === "error" ? "bg-red-50 text-red-600" : "bg-zinc-100 text-zinc-700")}>{state.status === "pairing" ? <LoaderCircle size={19} className="animate-spin" /> : state.status === "ready" ? <Laptop2 size={19} /> : <AlertTriangle size={19} />}</div><h3 className="mt-4 text-[16px] font-semibold tracking-tight">{state.status === "pairing" ? "Creating a secure connection" : state.status === "ready" ? "Finish in Mutex Companion" : "Companion pairing failed"}</h3><p className="mx-auto mt-2 max-w-sm text-[11px] leading-5 text-zinc-500">{state.status === "pairing" ? "This only takes a moment." : state.status === "ready" ? "The desktop app should open automatically. If it does not, enter the code below in the companion." : state.message}</p>{code && <button onClick={() => void navigator.clipboard?.writeText(code)} className="mx-auto mt-5 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 font-mono text-[14px] font-semibold tracking-[.18em]"><Copy size={13} className="text-zinc-400" />{code}</button>}<button onClick={onClose} className="mt-5 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Back to Mutex</button></div></Modal>;
+  return <Modal onClose={state.status === "pairing" ? () => undefined : onClose} width="max-w-md"><div className="p-7 text-center"><div className={cx("mx-auto grid size-11 place-items-center rounded-xl", state.status === "error" ? "bg-red-50 text-red-600" : "bg-zinc-100 text-zinc-700")}>{state.status === "pairing" ? <LoaderCircle size={19} className="animate-spin" /> : state.status === "ready" ? <Laptop2 size={19} /> : <AlertTriangle size={19} />}</div><h3 className="mt-4 text-[16px] font-semibold tracking-tight">{state.status === "pairing" ? "Starting authorisation" : state.status === "ready" ? "Complete authorisation in Mutex Companion" : "Companion authorisation failed"}</h3><p className="mx-auto mt-2 max-w-sm text-[11px] leading-5 text-zinc-500">{state.status === "pairing" ? "Creating a secure one-time authorisation code." : state.status === "ready" ? "The desktop app should open automatically. If it does not, enter the authorisation code below in the Companion." : state.message}</p>{code && <button onClick={() => void navigator.clipboard?.writeText(code)} className="mx-auto mt-5 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 font-mono text-[14px] font-semibold tracking-[.18em]"><Copy size={13} className="text-zinc-400" />{code}</button>}<button onClick={onClose} className="mt-5 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Back to Mutex</button></div></Modal>;
 }
 
 function CancelModal({ task, onClose, onConfirm }: { task: Task; onClose: () => void; onConfirm: () => void }) {
