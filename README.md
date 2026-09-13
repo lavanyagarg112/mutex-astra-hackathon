@@ -153,7 +153,7 @@ The included `render.yaml` creates one Docker web service and one PostgreSQL dat
 | `GITHUB_CLIENT_ID` | GitHub OAuth client ID |
 | `GITHUB_CLIENT_SECRET` | GitHub OAuth client secret |
 | `GITHUB_CALLBACK_URL` | `https://YOUR-SERVICE.onrender.com/api/auth/github/callback` |
-| `COMPANION_RELEASE_URL` | Public GitHub Release page containing the installers |
+| `COMPANION_RELEASE_URL` | `https://github.com/lavanyagarg112/mutex-public/releases/tag/v1` |
 
 Render supplies `DATABASE_URL` and generates both server secrets. Keep `ALLOW_DEMO_AUTH=false` in production. Set the GitHub OAuth App homepage to the deployed root URL and its callback to the exact URL shown above.
 
@@ -166,7 +166,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Download the workflow artifacts, attach them to one GitHub Release, and set `COMPANION_RELEASE_URL` to that release page. Mutex then displays one **Download Companion** button that works for every operating system.
+The current installers are available from the [Mutex Companion v1 release](https://github.com/lavanyagarg112/mutex-public/releases/tag/v1). Set `COMPANION_RELEASE_URL` to that page so Mutex displays one **Download Companion** button that works for every operating system.
 
 Local packaging commands are also available:
 
