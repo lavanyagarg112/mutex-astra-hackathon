@@ -145,6 +145,7 @@ export class DaemonRuntime {
   private async executeTask(execution: ActiveExecution): Promise<void> {
     const { payload, binding, controller } = execution;
     const { project, task } = payload;
+    const isInitialization = task.executionMode === "INITIALIZATION";
     let synced = false;
     try {
       if (project.toolPermissions?.git === false) throw new Error("Git operations are disabled for this project.");
@@ -163,20 +164,24 @@ export class DaemonRuntime {
         baseCommitSha: sync.commitSha,
       });
 
-      if (project.toolPermissions?.tests === false) throw new Error("Validation is required before push, but test execution is disabled for this project.");
-      if (!project.testCommand) throw new Error("Validation is required before push. Configure a test command in Project settings → Commands.");
+      if (isInitialization) {
+        this.activity(project.id, task.id, "SETUP", "initialization task does not require an existing validation command");
+      } else {
+        if (project.toolPermissions?.tests === false) throw new Error("Validation is required before push, but test execution is disabled for this project.");
+        if (!project.testCommand) throw new Error("Validation is required before push. Configure a test command in Project settings → Commands.");
 
-      // A clean remote checkout must pass before the agent is allowed to edit.
-      // Otherwise an environment or pre-existing repository problem could be
-      // misdiagnosed as a regression caused by the task.
-      this.activity(project.id, task.id, "TEST", "checking clean remote baseline");
-      try {
-        await this.runConfiguredCommand(execution, project.testCommand, "TEST");
-      } catch (error) {
-        if (error instanceof ValidationCommandError) {
-          throw new Error(`Clean remote baseline validation failed before the agent ran. Fix the project test environment or the configured validation command, then retry. ${this.validationExcerpt(error)}`);
+        // A clean remote checkout must pass before the agent is allowed to edit.
+        // Otherwise an environment or pre-existing repository problem could be
+        // misdiagnosed as a regression caused by the task.
+        this.activity(project.id, task.id, "TEST", "checking clean remote baseline");
+        try {
+          await this.runConfiguredCommand(execution, project.testCommand, "TEST");
+        } catch (error) {
+          if (error instanceof ValidationCommandError) {
+            throw new Error(`Clean remote baseline validation failed before the agent ran. Fix the project test environment or the configured validation command, then retry. ${this.validationExcerpt(error)}`);
+          }
+          throw error;
         }
-        throw error;
       }
 
       await execution.provider.run({
@@ -189,41 +194,47 @@ export class DaemonRuntime {
       });
       if (controller.signal.aborted) throw controller.signal.reason;
 
-      const configuredAttempts = Number(process.env.RELAYCODE_VALIDATION_REPAIR_ATTEMPTS ?? 2);
-      const repairAttempts = Number.isFinite(configuredAttempts) ? Math.max(0, Math.min(3, Math.floor(configuredAttempts))) : 2;
-      for (let attempt = 0; ; attempt += 1) {
-        this.taskStatus(execution, "VALIDATING", false, attempt === 0 ? "Running required project validation" : `Re-running validation after repair ${attempt}`);
-        try {
-          await this.runConfiguredCommand(execution, project.testCommand, "TEST");
-          break;
-        } catch (error) {
-          if (!(error instanceof ValidationCommandError) || attempt >= repairAttempts) {
-            if (error instanceof ValidationCommandError) throw new Error(`Validation still fails after ${attempt} repair attempt${attempt === 1 ? "" : "s"}. ${this.validationExcerpt(error)}`);
-            throw error;
-          }
+      if (isInitialization) {
+        this.output(project.id, task.id, "SYSTEM", "Repository initialization finished. Existing validation was intentionally skipped; infer and review the new commands after this commit.");
+      } else {
+        const validationCommand = project.testCommand;
+        if (!validationCommand) throw new Error("Validation is required before push. Configure a test command in Project settings → Commands.");
+        const configuredAttempts = Number(process.env.RELAYCODE_VALIDATION_REPAIR_ATTEMPTS ?? 2);
+        const repairAttempts = Number.isFinite(configuredAttempts) ? Math.max(0, Math.min(3, Math.floor(configuredAttempts))) : 2;
+        for (let attempt = 0; ; attempt += 1) {
+          this.taskStatus(execution, "VALIDATING", false, attempt === 0 ? "Running required project validation" : `Re-running validation after repair ${attempt}`);
+          try {
+            await this.runConfiguredCommand(execution, validationCommand, "TEST");
+            break;
+          } catch (error) {
+            if (!(error instanceof ValidationCommandError) || attempt >= repairAttempts) {
+              if (error instanceof ValidationCommandError) throw new Error(`Validation still fails after ${attempt} repair attempt${attempt === 1 ? "" : "s"}. ${this.validationExcerpt(error)}`);
+              throw error;
+            }
 
-          const repairNumber = attempt + 1;
-          this.taskStatus(execution, "EDITING", false, `Repairing validation failure (${repairNumber}/${repairAttempts})`);
-          this.output(project.id, task.id, "AGENT", `Validation failed. Sending the test output back to the developer agent for repair ${repairNumber} of ${repairAttempts}.`);
-          execution.provider = createAgentProvider(this.config, payload.agentCredential, payload.project.developerModel);
-          const repairPayload: StartTaskPayload = {
-            ...payload,
-            request: [
-              payload.request,
-              `Repair the implementation so the required validation command passes. This is repair attempt ${repairNumber} of ${repairAttempts}.`,
-              "Do not weaken, delete, or bypass tests. Diagnose the implementation and make the smallest correct code change.",
-              `Validation output:\n${error.output.slice(-12_000)}`,
-            ].join("\n\n"),
-          };
-          await execution.provider.run({
-            payload: repairPayload,
-            repositoryPath: binding.path,
-            signal: controller.signal,
-            pauseGate: execution.pauseGate,
-            status: ({ shortStatus }) => this.taskStatus(execution, "EDITING", false, shortStatus),
-            output: (category, message) => this.output(project.id, task.id, category, message),
-          });
-          if (controller.signal.aborted) throw controller.signal.reason;
+            const repairNumber = attempt + 1;
+            this.taskStatus(execution, "EDITING", false, `Repairing validation failure (${repairNumber}/${repairAttempts})`);
+            this.output(project.id, task.id, "AGENT", `Validation failed. Sending the test output back to the developer agent for repair ${repairNumber} of ${repairAttempts}.`);
+            execution.provider = createAgentProvider(this.config, payload.agentCredential, payload.project.developerModel);
+            const repairPayload: StartTaskPayload = {
+              ...payload,
+              request: [
+                payload.request,
+                `Repair the implementation so the required validation command passes. This is repair attempt ${repairNumber} of ${repairAttempts}.`,
+                "Do not weaken, delete, or bypass tests. Diagnose the implementation and make the smallest correct code change.",
+                `Validation output:\n${error.output.slice(-12_000)}`,
+              ].join("\n\n"),
+            };
+            await execution.provider.run({
+              payload: repairPayload,
+              repositoryPath: binding.path,
+              signal: controller.signal,
+              pauseGate: execution.pauseGate,
+              status: ({ shortStatus }) => this.taskStatus(execution, "EDITING", false, shortStatus),
+              output: (category, message) => this.output(project.id, task.id, category, message),
+            });
+            if (controller.signal.aborted) throw controller.signal.reason;
+          }
         }
       }
       this.taskStatus(execution, "PUSHING", false, "Checking remote and creating one commit");

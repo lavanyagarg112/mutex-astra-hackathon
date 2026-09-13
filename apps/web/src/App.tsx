@@ -64,7 +64,7 @@ type Member = User & { online: boolean; daemonVersion?: string; syncedSha?: stri
 type ProjectItem = Project & { members: Member[]; onlineCount: number };
 type ProcessInfo = { name: string; status: "running" | "stopped" | "starting" | "failed"; port?: number; url?: string };
 type ProjectData = { project: ProjectItem; tasks: Task[]; activity: Activity[]; processes: ProcessInfo[] };
-type ModalName = "project" | "createProject" | "user" | "share" | "rollback" | "cancel" | null;
+type ModalName = "project" | "createProject" | "initialize" | "user" | "share" | "rollback" | "cancel" | null;
 type Toast = { id: number; message: string; tone?: "success" | "warning" };
 type GithubRepository = { id: number | string; fullName: string; name: string; owner: string; cloneUrl: string; defaultBranch: string; private?: boolean; canWrite?: boolean; permissions?: { push?: boolean } };
 type InferredCommands = Pick<Project, "installCommand" | "frontendCommand" | "backendCommand" | "testCommand"> & {
@@ -73,6 +73,9 @@ type InferredCommands = Pick<Project, "installCommand" | "frontendCommand" | "ba
   diagnostics?: string[];
 };
 type PairingState = { status: "pairing" | "ready" | "error"; code?: string; message?: string };
+type RepositoryFrontend = "REACT" | "NEXT_JS" | "VUE" | "SVELTE" | "NONE";
+type RepositoryBackend = "EXPRESS" | "FASTIFY" | "NEST_JS" | "FASTAPI" | "DJANGO" | "NONE";
+type RepositoryDatabase = "POSTGRESQL" | "MYSQL" | "SQLITE" | "MONGODB" | "NONE";
 
 const alice: Member = { id: "alice", name: "Alice Chen", username: "alice", online: true, daemonVersion: "0.4.2", syncedSha: "4af71c2", color: "#343434" };
 const bob: Member = { id: "bob", name: "Bob Rivera", username: "bob", online: true, daemonVersion: "0.4.2", syncedSha: "4af71c2", color: "#8e6b3d" };
@@ -357,8 +360,9 @@ function Workspace() {
         </div>)}
       </div>
 
-      {modal === "project" && <ProjectSettingsModal project={data.project} socket={socket} onClose={() => setModal(null)} onSave={(project) => { setData((current) => current ? ({ ...current, project: { ...current.project, ...project } }) : current); setModal(null); toast("Project settings saved."); }} />}
+      {modal === "project" && <ProjectSettingsModal project={data.project} socket={socket} onClose={() => setModal(null)} onInitialize={() => setModal("initialize")} onSave={(project) => { setData((current) => current ? ({ ...current, project: { ...current.project, ...project } }) : current); setModal(null); toast("Project settings saved."); }} />}
       {modal === "createProject" && <CreateProjectModal user={currentUser} onClose={() => setModal(null)} onCreated={(project) => { const normalized = normalizeProject({ ...project, members: [], onlineCount: 0 }); setProjects((current) => [...current, normalized]); setProjectId(project.id); setModal(null); toast("Project created. Open the companion to clone or connect the repository."); }} />}
+      {modal === "initialize" && <InitializeRepositoryModal project={data.project} onClose={() => setModal(null)} onStarted={() => { setModal(null); toast("Repository initialization queued. It will run on your companion without requiring an existing validation command."); }} />}
       {modal === "user" && <UserSettingsModal projects={projects} user={currentUser} onClose={() => setModal(null)} />}
       {modal === "share" && <ShareModal project={data.project} onClose={() => setModal(null)} toast={toast} />}
       {modal === "cancel" && selectedTask && <CancelModal task={selectedTask} onClose={() => setModal(null)} onConfirm={() => { emitControl("cancel", selectedTask); setModal(null); }} />}
@@ -736,7 +740,7 @@ function CreateProjectModal({ user, onClose, onCreated }: { user: User; onClose:
   </Modal>;
 }
 
-function ProjectSettingsModal({ project, socket, onClose, onSave }: { project: ProjectItem; socket: AppSocket | null; onClose: () => void; onSave: (project: ProjectItem) => void }) {
+function ProjectSettingsModal({ project, socket, onClose, onInitialize, onSave }: { project: ProjectItem; socket: AppSocket | null; onClose: () => void; onInitialize: () => void; onSave: (project: ProjectItem) => void }) {
   const [draft, setDraft] = useState(project);
   const [agentCredential, setAgentCredential] = useState("");
   const [clearAgentCredential, setClearAgentCredential] = useState(false);
@@ -774,12 +778,53 @@ function ProjectSettingsModal({ project, socket, onClose, onSave }: { project: P
       {tab === "repository" && <div className="space-y-5"><div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4"><div className="flex items-center gap-2 text-[11px] font-semibold"><Github size={15} /> {project.repositoryOwner}/{project.repositoryName}<span className="ml-auto flex items-center gap-1 text-[9px] font-medium text-emerald-700"><CheckCircle2 size={11} /> Write access verified</span></div><p className="mt-2 text-[9px] leading-4 text-zinc-500">The remote branch is the canonical source. Every companion hard-resets tracked files before execution.</p></div><div className="grid gap-4 sm:grid-cols-2"><Field label="Repository owner"><input disabled value={project.repositoryOwner} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field><Field label="Repository"><input disabled value={project.repositoryName} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field></div><Field label="Configured branch" hint="History rewriting must be allowed for rollback"><div className="relative"><GitBranch size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft.branch} onChange={(event) => setDraft({ ...draft, branch: event.target.value })} className={cx(fieldClass, "pl-9")} /></div></Field><div className="flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[9px] leading-4 text-amber-900"><AlertTriangle size={14} className="mt-0.5 shrink-0" /> Destructive rollback rewrites this branch with force-with-lease. Protected branches may reject the operation safely.</div></div>}
       {tab === "agent" && <div className="space-y-5"><div className="grid gap-4 sm:grid-cols-2"><Field label="Coordinator model" hint="Classifies only"><select value={draft.coordinatorModel} onChange={(event) => setDraft({ ...draft, coordinatorModel: event.target.value })} className={fieldClass}><option>coordinator-lite</option><option>gpt-5-mini</option><option>local-classifier</option></select></Field><Field label="Developer model" hint="Runs locally"><select value={draft.developerModel} onChange={(event) => setDraft({ ...draft, developerModel: event.target.value })} className={fieldClass}><option>gpt-5.6-sol</option><option>local-agent</option><option>command</option><option>demo</option></select></Field></div><Field label={project.agentCredentialConfigured ? "Replace shared OpenAI key (optional)" : "Shared OpenAI key"} hint="One project owner configures this once"><input type="password" autoComplete="off" value={agentCredential} disabled={clearAgentCredential} onChange={(event) => setAgentCredential(event.target.value)} placeholder={project.agentCredentialConfigured ? "••••••••••••••••  (configured)" : "sk-…"} className={fieldClass} /></Field><div className="flex items-center justify-between rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5"><div><div className="text-[10px] font-medium text-zinc-700">{project.agentCredentialConfigured ? "Shared key configured" : "No shared key configured"}</div><div className="mt-0.5 text-[9px] text-zinc-400">The key is never returned to browsers or written to activity logs.</div></div>{project.agentCredentialConfigured && <button type="button" onClick={() => { setClearAgentCredential((value) => !value); setAgentCredential(""); }} className={cx("rounded-lg px-3 py-1.5 text-[9px] font-medium", clearAgentCredential ? "bg-red-600 text-white" : "border border-zinc-200 bg-white text-red-600")}>{clearAgentCredential ? "Will remove on save" : "Remove key"}</button>}</div><div><div className="text-[10px] font-semibold text-zinc-700">Tool permissions</div><div className="mt-2 divide-y divide-zinc-100 rounded-xl border border-zinc-200 px-3">{Object.entries(permissions).map(([name, enabled]) => <label key={name} className="flex items-center py-2.5 text-[10px]"><span className="text-zinc-600">{name}</span><button type="button" aria-pressed={enabled} onClick={() => setPermissions({ ...permissions, [name]: !enabled })} className={cx("ml-auto h-5 w-9 rounded-full p-0.5 transition", enabled ? "bg-zinc-900" : "bg-zinc-200")}><span className={cx("block size-4 rounded-full bg-white shadow-sm transition-transform", enabled && "translate-x-4")} /></button></label>)}</div></div></div>}
       {tab === "commands" && <div className="space-y-4">
+        <div className="flex items-center justify-between gap-4 rounded-xl border border-zinc-900 bg-zinc-950 p-4 text-white"><div><div className="flex items-center gap-2 text-[11px] font-semibold"><Zap size={13} fill="currentColor" /> Initialize or complete setup</div><p className="mt-1 text-[9px] leading-4 text-zinc-400">Works for new repositories and existing websites whose run or validation commands are missing. Existing application code is preserved.</p></div><button type="button" onClick={onInitialize} className="shrink-0 rounded-lg bg-white px-3 py-2 text-[9px] font-semibold text-zinc-950 hover:bg-zinc-100">Choose stack</button></div>
         <div className="flex items-start justify-between gap-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3"><p className="text-[10px] leading-4 text-zinc-500">Relaycode inspects manifests, README instructions, workspace files, Makefiles, environment examples, and CI configuration. When a shared OpenAI key is configured, the project agent selects the best repository-grounded commands. Every result remains editable.</p><button type="button" disabled={detectingCommands} onClick={() => void detectCommands()} className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[9px] font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:text-zinc-300"><RefreshCw size={11} className={detectingCommands ? "animate-spin" : ""} />{detectingCommands ? "Agent inspecting…" : "Infer again"}</button></div>
         {commandDetectionMessage && <p className={cx("rounded-lg px-3 py-2 text-[9px] leading-4", commandDetectionFailed ? "bg-red-50 text-red-700" : "bg-emerald-50 text-emerald-700")}>{commandDetectionMessage}</p>}
         {(["installCommand", "frontendCommand", "backendCommand", "testCommand"] as const).map((key) => <Field key={key} label={key.replace("Command", " command").replace(/^./, (character) => character.toUpperCase())} hint={key === "testCommand" ? "Must succeed before a push" : undefined}><div className="relative"><TerminalSquare size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft[key] ?? ""} onChange={(event) => setDraft({ ...draft, [key]: event.target.value || null })} placeholder={key === "installCommand" ? "npm install" : key === "frontendCommand" ? "npm run dev" : key === "backendCommand" ? "npm run server" : "npm test"} className={cx(fieldClass, "pl-9 font-mono")} /></div></Field>)}
       </div>}
     </div>
     <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-5 py-4 sm:px-6"><button onClick={onClose} className="rounded-xl px-4 py-2.5 text-[10px] font-medium text-zinc-500 hover:bg-zinc-50">Cancel</button><button onClick={save} className="rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white">Save changes</button></div>
+  </Modal>;
+}
+
+function InitializeRepositoryModal({ project, onClose, onStarted }: { project: ProjectItem; onClose: () => void; onStarted: () => void }) {
+  const [frontend, setFrontend] = useState<RepositoryFrontend>("REACT");
+  const [backend, setBackend] = useState<RepositoryBackend>("EXPRESS");
+  const [database, setDatabase] = useState<RepositoryDatabase>("POSTGRESQL");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/projects/${project.id}/initialize`, {
+        method: "POST",
+        body: JSON.stringify({ projectId: project.id, frontend, backend, database }),
+      });
+      onStarted();
+    } catch (reason) {
+      let message = reason instanceof Error ? reason.message : "Could not initialize this repository.";
+      try { message = JSON.parse(message).error ?? message; } catch { /* plain server response */ }
+      setError(message);
+      setSaving(false);
+    }
+  };
+  return <Modal onClose={onClose} width="max-w-lg">
+    <ModalHeader icon={<Zap size={16} />} title="Initialize or complete setup" description="Choose the stack. Relaycode preserves an existing site and fills in missing setup commands." onClose={onClose} />
+    <form onSubmit={submit}>
+      <div className="space-y-4 p-5 sm:p-6">
+        <div className="flex gap-2 rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-[9px] leading-4 text-blue-900"><ShieldCheck size={13} className="mt-0.5 shrink-0" /><span>This setup run does not require or run a pre-existing validation command. Relaycode inspects and preserves an existing application, fills in missing setup, then saves the detected install, preview, and validation commands.</span></div>
+        <Field label="Frontend"><select autoFocus value={frontend} onChange={(event) => setFrontend(event.target.value as RepositoryFrontend)} className={fieldClass}><option value="REACT">React</option><option value="NEXT_JS">Next.js</option><option value="VUE">Vue</option><option value="SVELTE">Svelte</option><option value="NONE">No frontend</option></select></Field>
+        <Field label="Backend"><select value={backend} onChange={(event) => setBackend(event.target.value as RepositoryBackend)} className={fieldClass}><option value="EXPRESS">Express</option><option value="FASTIFY">Fastify</option><option value="NEST_JS">NestJS</option><option value="FASTAPI">FastAPI</option><option value="DJANGO">Django</option><option value="NONE">No backend</option></select></Field>
+        <Field label="Database"><select value={database} onChange={(event) => setDatabase(event.target.value as RepositoryDatabase)} className={fieldClass}><option value="POSTGRESQL">PostgreSQL</option><option value="MYSQL">MySQL</option><option value="SQLITE">SQLite</option><option value="MONGODB">MongoDB</option><option value="NONE">No database</option></select></Field>
+        <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-[9px] leading-4 text-zinc-500"><strong className="text-zinc-700">Remote target:</strong> {project.repositoryOwner}/{project.repositoryName} · {project.branch}</div>
+        {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-[10px] text-red-700">{error}</p>}
+      </div>
+      <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-5 py-4 sm:px-6"><button type="button" onClick={onClose} className="rounded-xl px-4 py-2.5 text-[10px] font-medium text-zinc-500 hover:bg-zinc-50">Cancel</button><button disabled={saving} className="flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2.5 text-[10px] font-medium text-white disabled:bg-zinc-300">{saving && <LoaderCircle size={12} className="animate-spin" />}{saving ? "Starting…" : "Initialize repository"}</button></div>
+    </form>
   </Modal>;
 }
 

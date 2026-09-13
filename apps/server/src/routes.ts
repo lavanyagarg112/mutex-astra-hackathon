@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { activeStatuses, CreateProjectSchema, CreateRefinementSchema, CreateRequestSchema, ProjectSettingsSchema, RollbackTaskSchema, TaskControlSchema } from "@relaycode/shared";
+import { activeStatuses, CreateProjectSchema, CreateRefinementSchema, CreateRequestSchema, InitializeRepositorySchema, ProjectSettingsSchema, RollbackTaskSchema, TaskControlSchema } from "@relaycode/shared";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { PrismaClient, TaskStatus } from "@prisma/client";
 import { z } from "zod";
@@ -197,6 +197,12 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
   router.post("/requests", async (req: AuthenticatedRequest, res) => {
     try { return res.status(201).json(await scheduler.createRequest(req.userId!, ...requestArgs(CreateRequestSchema.parse(req.body)))); }
     catch (error) { return routeError(res, error); }
+  });
+  router.post("/projects/:projectId/initialize", async (req: AuthenticatedRequest, res) => {
+    try {
+      const payload = InitializeRepositorySchema.parse({ ...req.body, projectId: pathParam(req, "projectId") });
+      return res.status(201).json(await scheduler.createInitialization(req.userId!, payload));
+    } catch (error) { return routeError(res, error); }
   });
   router.post("/refinements", async (req: AuthenticatedRequest, res) => {
     try {

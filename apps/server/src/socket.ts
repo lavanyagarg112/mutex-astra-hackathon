@@ -6,6 +6,7 @@ import {
   DaemonConnectedSchema,
   GitPushResultSchema,
   GitSyncResultSchema,
+  InitializeRepositorySchema,
   ProjectSettingsSchema,
   RollbackResultSchema,
   RollbackTaskSchema,
@@ -90,6 +91,10 @@ export function installSocketHandlers(io: RelayServer, prisma: PrismaClient, sch
       const userId = browserUser(socket);
       const payload = CreateRequestSchema.parse(raw);
       await scheduler.createRequest(userId, payload.projectId, payload.body);
+    }));
+    socket.on("INITIALIZE_REPOSITORY", (raw) => void guarded(socket, async () => {
+      const payload = InitializeRepositorySchema.parse(raw);
+      await scheduler.createInitialization(browserUser(socket), payload);
     }));
     socket.on("CREATE_REFINEMENT", (raw) => void guarded(socket, async () => {
       const userId = browserUser(socket);

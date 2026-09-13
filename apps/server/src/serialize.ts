@@ -43,6 +43,8 @@ export function serializeTask(task: TaskWithRelations) {
     rootMessageId: task.rootMessageId,
     parentTaskId: task.parentTaskId,
     type: task.type,
+    executionMode: task.executionMode,
+    initializationConfig: task.initializationConfig,
     status: task.status,
     queuePriority: task.queuePriority,
     queueSequence: task.queueSequence,
