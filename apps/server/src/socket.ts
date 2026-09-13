@@ -3,6 +3,7 @@ import {
   ActivityInputSchema,
   CreateRefinementSchema,
   CreateRequestSchema,
+  CreateTeamMessageSchema,
   DaemonConnectedSchema,
   GitPushResultSchema,
   GitSyncResultSchema,
@@ -21,6 +22,7 @@ import { demoAuthEnabled, hashToken, HttpError, readCookie, requireMember, SESSI
 import type { RelayServer, RelaySocket } from "./realtime.js";
 import { RuntimeState } from "./runtime.js";
 import { Scheduler } from "./scheduler.js";
+import { createTeamMessage } from "./team-chat.js";
 
 const ExtendedProjectSettingsSchema = ProjectSettingsSchema;
 
@@ -91,6 +93,13 @@ export function installSocketHandlers(io: RelayServer, prisma: PrismaClient, sch
       const userId = browserUser(socket);
       const payload = CreateRequestSchema.parse(raw);
       await scheduler.createRequest(userId, payload.projectId, payload.body);
+    }));
+    socket.on("CREATE_TEAM_MESSAGE", (raw) => void guarded(socket, async () => {
+      const userId = browserUser(socket);
+      const payload = CreateTeamMessageSchema.parse(raw);
+      const message = await createTeamMessage(prisma, payload, userId);
+      io.to(`project:${payload.projectId}:web`).emit("MESSAGE_CREATED", { projectId: payload.projectId, messageId: message.id });
+      await recordActivity(prisma, io, { projectId: payload.projectId, userId, category: "CHAT", message: "sent a team message" });
     }));
     socket.on("INITIALIZE_REPOSITORY", (raw) => void guarded(socket, async () => {
       const payload = InitializeRepositorySchema.parse(raw);

@@ -66,6 +66,15 @@ export const ActivitySchema = z.object({
 export type Activity = z.infer<typeof ActivitySchema>;
 
 export const CreateRequestSchema = z.object({ projectId: z.string(), body: z.string().trim().min(2).max(10_000) });
+/**
+ * A human-only project conversation message. These messages are deliberately
+ * separate from requests/refinements and never participate in a Task.
+ */
+export const CreateTeamMessageSchema = z.object({
+  projectId: z.string(),
+  body: z.string().trim().min(1).max(10_000),
+  replyToMessageId: z.string().nullable().optional(),
+});
 export const InitializeRepositorySchema = RepositoryInitializationSchema.extend({ projectId: z.string() });
 export const CreateProjectSchema = z.object({
   name: z.string().trim().min(2).max(100),
@@ -129,6 +138,7 @@ export interface ClientToServerEvents {
   PROCESS_STATUS: (payload: { projectId: string; name: string; status: "starting" | "running" | "stopped" | "failed"; port?: number; url?: string }) => void;
   ACTIVITY_EVENT: (payload: z.infer<typeof ActivityInputSchema>) => void;
   CREATE_REQUEST: (payload: z.infer<typeof CreateRequestSchema>) => void;
+  CREATE_TEAM_MESSAGE: (payload: z.infer<typeof CreateTeamMessageSchema>) => void;
   INITIALIZE_REPOSITORY: (payload: z.infer<typeof InitializeRepositorySchema>) => void;
   CREATE_REFINEMENT: (payload: z.infer<typeof CreateRefinementSchema>) => void;
   PAUSE_ACTIVE_TASK: (payload: z.infer<typeof TaskControlSchema>) => void;

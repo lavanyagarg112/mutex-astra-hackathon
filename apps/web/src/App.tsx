@@ -53,7 +53,7 @@ import {
   Zap,
 } from "lucide-react";
 import { forwardRef, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import type { Activity, Project, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
+import type { Activity, Message, Project, StoredDiff, Task, TaskStatus, User } from "@relaycode/shared";
 import { activeStatuses } from "@relaycode/shared";
 import { API_URL, ApiError, api, beginGithubLogin, connectSocket, getActiveUserId, loginWithUsername, setActiveUserId } from "./lib/api";
 import type { Socket } from "socket.io-client";
@@ -63,7 +63,7 @@ type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 type Member = User & { online: boolean; daemonVersion?: string; syncedSha?: string; mapped?: boolean; synchronized?: boolean; localPath?: string; color: string };
 type ProjectItem = Project & { members: Member[]; onlineCount: number };
 type ProcessInfo = { name: string; status: "running" | "stopped" | "starting" | "failed"; port?: number; url?: string };
-type ProjectData = { project: ProjectItem; tasks: Task[]; activity: Activity[]; processes: ProcessInfo[] };
+type ProjectData = { project: ProjectItem; tasks: Task[]; messages: Message[]; activity: Activity[]; processes: ProcessInfo[] };
 type ModalName = "project" | "createProject" | "initialize" | "user" | "share" | "rollback" | "cancel" | null;
 type Toast = { id: number; message: string; tone?: "success" | "warning" };
 type GithubRepository = { id: number | string; fullName: string; name: string; owner: string; cloneUrl: string; defaultBranch: string; private?: boolean; canWrite?: boolean; permissions?: { push?: boolean } };
@@ -119,6 +119,7 @@ function normalizeProjectPayload(raw: unknown): ProjectData | null {
   return {
     project,
     tasks: source.tasks as Task[],
+    messages: (Array.isArray(source.messages) ? source.messages : []) as Message[],
     activity: (Array.isArray(source.activities) ? source.activities : Array.isArray(source.activity) ? source.activity : []) as Activity[],
     processes: rawProcesses.map((entry) => {
       const process = entry as { name?: string; status?: string; port?: number; url?: string };
@@ -231,6 +232,7 @@ function Workspace() {
     nextSocket.on("connect_error", () => setServerMode("connecting"));
     nextSocket.on("QUEUE_UPDATED", refresh);
     nextSocket.on("TASK_UPDATED", refresh);
+    nextSocket.on("MESSAGE_CREATED", refresh);
     nextSocket.on("ACTIVITY_CREATED", refresh);
     nextSocket.on("DIFF_AVAILABLE", refresh);
     nextSocket.on("MEMBER_STATUS_CHANGED", refresh);
@@ -283,10 +285,20 @@ function Workspace() {
     .filter((task) => task.status === "QUEUED" || task.status === "WAITING_FOR_REQUESTER" || task.status === "REMOTE_DIVERGED")
     .sort((a, b) => b.queuePriority - a.queuePriority || a.queueSequence - b.queueSequence), [tasks]);
   const queuePositions = useMemo(() => new Map(pending.map((task, index) => [task.id, index + 1])), [pending]);
-  const conversation = useMemo(() => [...tasks].sort((a, b) => {
-    const byCreatedAt = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-    return byCreatedAt || a.number - b.number;
-  }), [tasks]);
+  const conversation = useMemo(() => {
+    const taskMessageIds = new Set(tasks.flatMap((task) => [task.rootMessageId, ...(task.messages ?? []).map((message) => message.id)]));
+    return [
+      ...tasks.map((task) => ({ kind: "task" as const, createdAt: task.createdAt, task })),
+      ...(data?.messages ?? [])
+        .filter((message) => !taskMessageIds.has(message.id))
+        .map((message) => ({ kind: "message" as const, createdAt: message.createdAt, message })),
+    ].sort((a, b) => {
+      const byCreatedAt = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (byCreatedAt) return byCreatedAt;
+      if (a.kind === "task" && b.kind === "task") return a.task.number - b.task.number;
+      return a.kind === "message" ? 1 : -1;
+    });
+  }, [data?.messages, tasks]);
 
   const chooseProject = (id: string) => {
     setProjectId(id);
@@ -332,13 +344,15 @@ function Workspace() {
               <QueueHeader active={active} pendingCount={pending.length} />
               <div className="fine-scrollbar flex-1 overflow-y-auto px-4 pb-44 pt-2 sm:px-6 lg:px-8">
                 <div className="mx-auto max-w-3xl space-y-3">
-                  {conversation.length ? conversation.map((task) => {
+                  {conversation.length ? conversation.map((item) => {
+                    if (item.kind === "message") return <TeamMessage key={`message:${item.message.id}`} message={item.message} currentUser={currentUser} />;
+                    const task = item.task;
                     const taskIsActive = active?.id === task.id;
-                    return <TaskCard key={task.id} task={task} queuePosition={queuePositions.get(task.id)} onRefine={(item) => { setComposerReply(item); composerRef.current?.focus(); }} onPause={() => taskIsActive && emitControl("pause", task)} onResume={() => taskIsActive && emitControl("resume", task)} onCancel={() => { if (taskIsActive) { setSelectedTask(task); setModal("cancel"); } }} onRollback={(item) => { setSelectedTask(item); setModal("rollback"); }} />;
+                    return <TaskCard key={`task:${task.id}`} task={task} queuePosition={queuePositions.get(task.id)} onRefine={(item) => { setComposerReply(item); composerRef.current?.focus(); }} onPause={() => taskIsActive && emitControl("pause", task)} onResume={() => taskIsActive && emitControl("resume", task)} onCancel={() => { if (taskIsActive) { setSelectedTask(task); setModal("cancel"); } }} onRollback={(item) => { setSelectedTask(item); setModal("rollback"); }} />;
                   }) : <EmptyQueue />}
                 </div>
               </div>
-              <Composer ref={composerRef} project={data.project} user={currentUser} replyTask={composerReply} serverMode={serverMode} socket={socket} onCancelReply={() => setComposerReply(null)} onCreated={(task) => { setData((current) => current ? ({ ...current, tasks: [...current.tasks, task] }) : current); toast(task.type === "REFINEMENT" ? "Refinement added at high priority." : "Request added to the execution queue."); }} />
+              <Composer ref={composerRef} project={data.project} user={currentUser} replyTask={composerReply} serverMode={serverMode} socket={socket} onCancelReply={() => setComposerReply(null)} onCreated={(task) => { setData((current) => current ? ({ ...current, tasks: [...current.tasks, task] }) : current); toast(task.type === "REFINEMENT" ? "Refinement added at high priority." : "Request added to the execution queue."); }} onMessageCreated={(message) => { setData((current) => current ? ({ ...current, messages: current.messages.some((item) => item.id === message.id) ? current.messages : [...current.messages, message] }) : current); }} />
             </section>
 
             <aside className="hidden min-h-0 bg-[#fafaf9] xl:flex xl:flex-col">
@@ -349,7 +363,7 @@ function Workspace() {
               {rightPanel === "preview" ? <PreviewPanel project={data.project} processes={data.processes} mode={serverMode} /> : <ActivityPanel activity={data.activity} />}
               <div className="border-t border-zinc-200 bg-white px-5 py-3">
                 <div className="flex items-center justify-between text-[11px]">
-                  <span className="flex items-center gap-1.5 font-medium text-zinc-600"><ShieldCheck size={13} /> Remote branch is canonical</span>
+                  <span className="flex items-center gap-1.5 font-medium text-zinc-600"><ShieldCheck size={13} /> Remote branch is source of truth</span>
                   <span className="font-mono text-zinc-400">origin/{data.project.branch}</span>
                 </div>
               </div>
@@ -567,6 +581,21 @@ function TaskCard({ task, queuePosition, onRefine, onPause, onResume, onCancel, 
   </article>;
 }
 
+function TeamMessage({ message, currentUser }: { message: Message; currentUser: User }) {
+  const person = message.author ?? (message.authorId === currentUser.id ? currentUser : { id: message.authorId, name: "Teammate", username: "teammate" });
+  const mine = message.authorId === currentUser.id;
+  return <div className={cx("flex items-start gap-3 px-4 py-2", mine && "flex-row-reverse")}>
+    <Avatar user={person} size="sm" />
+    <div className={cx("max-w-[78%]", mine && "text-right")}>
+      <div className={cx("mb-1 flex items-center gap-2 text-[10px]", mine && "justify-end")}><span className="font-semibold text-zinc-700">{person.name}</span><span className="text-zinc-400">{when(message.createdAt)}</span></div>
+      <div className={cx("inline-block rounded-2xl px-3.5 py-2.5 text-left text-[13px] leading-5", mine ? "rounded-tr-md bg-zinc-900 text-white" : "rounded-tl-md bg-zinc-100 text-zinc-800")}>
+        {message.body}
+      </div>
+      <div className="mt-1 text-[9px] text-zinc-400">Team message · not shared with the agent</div>
+    </div>
+  </div>;
+}
+
 function DiffViewer({ diff }: { diff: StoredDiff }) {
   const [view, setView] = useState<"files" | "patch">("files");
   return <div className="mt-3 overflow-hidden rounded-xl border border-zinc-200 bg-[#fbfbfa]">
@@ -578,31 +607,46 @@ function DiffViewer({ diff }: { diff: StoredDiff }) {
   </div>;
 }
 
-function EmptyQueue() { return <div className="rounded-2xl border border-dashed border-zinc-200 py-9 text-center"><CheckCircle2 className="mx-auto text-zinc-300" size={22} /><div className="mt-2 text-[12px] font-medium text-zinc-500">Queue is clear</div><p className="mt-1 text-[10px] text-zinc-400">New requests can start immediately.</p></div>; }
+function EmptyQueue() { return <div className="rounded-2xl border border-dashed border-zinc-200 py-9 text-center"><CheckCircle2 className="mx-auto text-zinc-300" size={22} /><div className="mt-2 text-[12px] font-medium text-zinc-500">Start the conversation</div><p className="mt-1 text-[10px] text-zinc-400">Message your team or send the agent a coding request.</p></div>; }
 
-const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: User; replyTask: Task | null; serverMode: "connecting" | "live" | "demo"; socket: AppSocket | null; onCancelReply: () => void; onCreated: (task: Task) => void }>(function Composer({ project, user, replyTask, serverMode, socket, onCancelReply, onCreated }, ref) {
+const Composer = forwardRef<HTMLTextAreaElement, { project: ProjectItem; user: User; replyTask: Task | null; serverMode: "connecting" | "live" | "demo"; socket: AppSocket | null; onCancelReply: () => void; onCreated: (task: Task) => void; onMessageCreated: (message: Message) => void }>(function Composer({ project, user, replyTask, serverMode, socket, onCancelReply, onCreated, onMessageCreated }, ref) {
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
   const [explicit, setExplicit] = useState(true);
+  const [mode, setMode] = useState<"agent" | "team">("agent");
+  const [error, setError] = useState("");
+  useEffect(() => { if (replyTask) setMode("agent"); }, [replyTask]);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (!body.trim() || sending) return;
-    setSending(true);
+    setSending(true); setError("");
     const text = body.trim();
     try {
       if (serverMode !== "live") throw new Error("Relaycode is reconnecting. Try again in a moment.");
-      const created = await api<Task>(replyTask ? "/api/refinements" : "/api/requests", { method: "POST", body: JSON.stringify(replyTask ? { projectId: project.id, parentTaskId: replyTask.id, body: text, explicit } : { projectId: project.id, body: text }) });
-      onCreated(created);
+      if (mode === "team" && !replyTask) {
+        const created = await api<Message>(`/api/projects/${project.id}/messages`, { method: "POST", body: JSON.stringify({ body: text }) });
+        onMessageCreated(created);
+      } else {
+        const created = await api<Task>(replyTask ? "/api/refinements" : "/api/requests", { method: "POST", body: JSON.stringify(replyTask ? { projectId: project.id, parentTaskId: replyTask.id, body: text, explicit } : { projectId: project.id, body: text }) });
+        onCreated(created);
+      }
       setBody(""); onCancelReply();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not send your message.");
     } finally { setSending(false); }
   };
   return <form onSubmit={submit} className="absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-white via-white to-transparent px-4 pb-4 pt-10 sm:px-6 lg:px-8">
     <div className="overflow-hidden rounded-[17px] border border-zinc-300 bg-white shadow-[0_16px_50px_rgba(24,24,27,.12)] transition focus-within:border-zinc-500 focus-within:ring-2 focus-within:ring-zinc-100">
+      {!replyTask && <div className="flex items-center gap-1 border-b border-zinc-100 px-3 pt-2.5">
+        <button type="button" onClick={() => setMode("team")} className={cx("flex items-center gap-1.5 rounded-t-lg px-3 py-2 text-[10px] font-medium transition", mode === "team" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-700")}><UsersRound size={12} /> Team message</button>
+        <button type="button" onClick={() => setMode("agent")} className={cx("flex items-center gap-1.5 rounded-t-lg px-3 py-2 text-[10px] font-medium transition", mode === "agent" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-700")}><Bot size={12} /> Agent request</button>
+      </div>}
       {replyTask && <div className="flex items-center gap-2 border-b border-zinc-100 bg-amber-50/70 px-3.5 py-2 text-[10px]"><MessageSquareReply size={12} className="text-amber-700" /><span className="font-medium text-amber-900">Refining Request #{replyTask.number}</span><span className="min-w-0 flex-1 truncate text-amber-700/70">{replyTask.rootMessage?.body}</span><label className="hidden items-center gap-1.5 text-[9px] text-amber-800 sm:flex"><input checked={explicit} onChange={(event) => setExplicit(event.target.checked)} type="checkbox" className="accent-zinc-900" /> Explicit reply</label><button type="button" onClick={onCancelReply} className="rounded p-1 text-amber-700 hover:bg-amber-100"><X size={12} /></button></div>}
-      <textarea ref={ref} value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={2} placeholder={replyTask ? "Describe the change to this request…" : "Ask the team agent to build something…"} className="block max-h-36 min-h-[66px] w-full resize-none bg-transparent px-4 pb-2 pt-3 text-[12px] leading-5 outline-none placeholder:text-zinc-400" />
+      <textarea ref={ref} value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={2} placeholder={replyTask ? "Describe the change to this request…" : mode === "team" ? "Message everyone in this project…" : "Ask the agent to build something…"} className="block max-h-36 min-h-[66px] w-full resize-none bg-transparent px-4 pb-2 pt-3 text-[12px] leading-5 outline-none placeholder:text-zinc-400" />
+      {error && <div className="mx-3 mb-2 rounded-lg bg-red-50 px-2.5 py-2 text-[10px] text-red-700">{error}</div>}
       <div className="flex items-center gap-2 px-3 pb-3">
-        <button type="button" className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-2 py-1.5 text-[9px] font-medium text-zinc-500 hover:bg-zinc-50"><Plus size={11} /> Attach context</button>
-        <span className="hidden text-[9px] text-zinc-400 sm:inline">Runs on your connected companion</span>
-        <button disabled={!body.trim() || sending} className="ml-auto grid size-8 place-items-center rounded-[10px] bg-zinc-950 text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400" aria-label="Submit request">{sending ? <LoaderCircle size={14} className="animate-spin" /> : <Send size={13} />}</button>
+        {mode === "agent" && <button type="button" className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-2 py-1.5 text-[9px] font-medium text-zinc-500 hover:bg-zinc-50"><Plus size={11} /> Attach context</button>}
+        <span className="hidden text-[9px] text-zinc-400 sm:inline">{mode === "team" && !replyTask ? "Visible to project members only · the agent cannot read it" : "Creates a task on your connected companion"}</span>
+        <button disabled={!body.trim() || sending} className="ml-auto grid size-8 place-items-center rounded-[10px] bg-zinc-950 text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400" aria-label={mode === "team" && !replyTask ? "Send team message" : "Submit agent request"}>{sending ? <LoaderCircle size={14} className="animate-spin" /> : <Send size={13} />}</button>
       </div>
     </div>
   </form>;
@@ -782,7 +826,7 @@ function ProjectSettingsModal({ project, socket, onClose, onInitialize, onSave }
   return <Modal onClose={onClose} width="max-w-2xl"><ModalHeader icon={<Settings size={16} />} title="Project settings" description="Repository rules, agent models, tool permissions, and local commands." onClose={onClose} />
     <div className="flex border-b border-zinc-100 px-5 sm:px-6">{(["repository", "agent", "commands"] as const).map((item) => <button key={item} onClick={() => setTab(item)} className={cx("relative px-3 py-3 text-[10px] font-medium capitalize", tab === item ? "text-zinc-900" : "text-zinc-400")}>{item}{tab === item && <span className="absolute inset-x-2 bottom-0 h-[2px] bg-zinc-900" />}</button>)}</div>
     <div className="min-h-[370px] p-5 sm:p-6">
-      {tab === "repository" && <div className="space-y-5"><div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4"><div className="flex items-center gap-2 text-[11px] font-semibold"><Github size={15} /> {project.repositoryOwner}/{project.repositoryName}<span className="ml-auto flex items-center gap-1 text-[9px] font-medium text-emerald-700"><CheckCircle2 size={11} /> Write access verified</span></div><p className="mt-2 text-[9px] leading-4 text-zinc-500">The remote branch is the canonical source. Every companion hard-resets tracked files before execution.</p></div><div className="grid gap-4 sm:grid-cols-2"><Field label="Repository owner"><input disabled value={project.repositoryOwner} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field><Field label="Repository"><input disabled value={project.repositoryName} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field></div><Field label="Configured branch" hint="History rewriting must be allowed for rollback"><div className="relative"><GitBranch size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft.branch} onChange={(event) => setDraft({ ...draft, branch: event.target.value })} className={cx(fieldClass, "pl-9")} /></div></Field><div className="flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[9px] leading-4 text-amber-900"><AlertTriangle size={14} className="mt-0.5 shrink-0" /> Destructive rollback rewrites this branch with force-with-lease. Protected branches may reject the operation safely.</div></div>}
+      {tab === "repository" && <div className="space-y-5"><div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4"><div className="flex items-center gap-2 text-[11px] font-semibold"><Github size={15} /> {project.repositoryOwner}/{project.repositoryName}<span className="ml-auto flex items-center gap-1 text-[9px] font-medium text-emerald-700"><CheckCircle2 size={11} /> Write access verified</span></div><p className="mt-2 text-[9px] leading-4 text-zinc-500">The remote branch is the source of truth. Every companion hard-resets tracked files before execution.</p></div><div className="grid gap-4 sm:grid-cols-2"><Field label="Repository owner"><input disabled value={project.repositoryOwner} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field><Field label="Repository"><input disabled value={project.repositoryName} className={cx(fieldClass, "bg-zinc-50 text-zinc-400")} /></Field></div><Field label="Configured branch" hint="History rewriting must be allowed for rollback"><div className="relative"><GitBranch size={13} className="absolute left-3 top-3.5 text-zinc-400" /><input value={draft.branch} onChange={(event) => setDraft({ ...draft, branch: event.target.value })} className={cx(fieldClass, "pl-9")} /></div></Field><div className="flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[9px] leading-4 text-amber-900"><AlertTriangle size={14} className="mt-0.5 shrink-0" /> Destructive rollback rewrites this branch with force-with-lease. Protected branches may reject the operation safely.</div></div>}
       {tab === "agent" && <div className="space-y-5"><div className="grid gap-4 sm:grid-cols-2"><Field label="Coordinator model" hint="Classifies only"><select value={draft.coordinatorModel} onChange={(event) => setDraft({ ...draft, coordinatorModel: event.target.value })} className={fieldClass}><option>coordinator-lite</option><option>gpt-5-mini</option><option>local-classifier</option></select></Field><Field label="Developer model" hint="Runs locally"><select value={draft.developerModel} onChange={(event) => setDraft({ ...draft, developerModel: event.target.value })} className={fieldClass}><option>gpt-5.6-sol</option><option>local-agent</option><option>command</option><option>demo</option></select></Field></div><Field label={project.agentCredentialConfigured ? "Replace shared OpenAI key (optional)" : "Shared OpenAI key"} hint="One project owner configures this once"><input type="password" autoComplete="off" value={agentCredential} disabled={clearAgentCredential} onChange={(event) => setAgentCredential(event.target.value)} placeholder={project.agentCredentialConfigured ? "••••••••••••••••  (configured)" : "sk-…"} className={fieldClass} /></Field><div className="flex items-center justify-between rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5"><div><div className="text-[10px] font-medium text-zinc-700">{project.agentCredentialConfigured ? "Shared key configured" : "No shared key configured"}</div><div className="mt-0.5 text-[9px] text-zinc-400">The key is never returned to browsers or written to activity logs.</div></div>{project.agentCredentialConfigured && <button type="button" onClick={() => { setClearAgentCredential((value) => !value); setAgentCredential(""); }} className={cx("rounded-lg px-3 py-1.5 text-[9px] font-medium", clearAgentCredential ? "bg-red-600 text-white" : "border border-zinc-200 bg-white text-red-600")}>{clearAgentCredential ? "Will remove on save" : "Remove key"}</button>}</div><div><div className="text-[10px] font-semibold text-zinc-700">Tool permissions</div><div className="mt-2 divide-y divide-zinc-100 rounded-xl border border-zinc-200 px-3">{Object.entries(permissions).map(([name, enabled]) => <label key={name} className="flex items-center py-2.5 text-[10px]"><span className="text-zinc-600">{name}</span><button type="button" aria-pressed={enabled} onClick={() => setPermissions({ ...permissions, [name]: !enabled })} className={cx("ml-auto h-5 w-9 rounded-full p-0.5 transition", enabled ? "bg-zinc-900" : "bg-zinc-200")}><span className={cx("block size-4 rounded-full bg-white shadow-sm transition-transform", enabled && "translate-x-4")} /></button></label>)}</div></div></div>}
       {tab === "commands" && <div className="space-y-4">
         <div className="flex items-center justify-between gap-4 rounded-xl border border-zinc-900 bg-zinc-950 p-4 text-white"><div><div className="flex items-center gap-2 text-[11px] font-semibold"><Zap size={13} fill="currentColor" /> Initialize or complete setup</div><p className="mt-1 text-[9px] leading-4 text-zinc-400">Works for new repositories and existing websites whose run or validation commands are missing. Existing application code is preserved.</p></div><button type="button" onClick={onInitialize} className="shrink-0 rounded-lg bg-white px-3 py-2 text-[9px] font-semibold text-zinc-950 hover:bg-zinc-100">Choose stack</button></div>
