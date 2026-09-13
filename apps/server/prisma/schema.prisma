@@ -1,0 +1,183 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProjectRole {
+  OWNER
+  MEMBER
+}
+
+enum TaskType {
+  NORMAL
+  REFINEMENT
+}
+
+enum TaskStatus {
+  QUEUED
+  WAITING_FOR_REQUESTER
+  SYNCING
+  PLANNING
+  EDITING
+  VALIDATING
+  PUSHING
+  SYNCING_TEAM
+  COMMITTED
+  PAUSED
+  FAILED
+  CANCELLED
+  REMOTE_DIVERGED
+  ROLLED_BACK
+  DISCARDED_BY_ROLLBACK
+}
+
+enum TaskMessageRole {
+  INITIAL
+  IN_FLIGHT_REFINEMENT
+}
+
+model User {
+  id              String @id
+  name            String
+  username        String @unique
+  avatarUrl       String?
+  daemonTokenHash String?
+  createdAt       DateTime @default(now())
+  memberships     ProjectMember[]
+  messages        Message[]
+  requestedTasks  Task[] @relation("RequestedTasks")
+  executedTasks   Task[] @relation("ExecutedTasks")
+  rollbackActions RollbackAction[]
+  activities      ActivityEvent[]
+}
+
+model Project {
+  id               String @id
+  name             String
+  slug             String @unique
+  repositoryOwner  String
+  repositoryName   String
+  repositoryUrl    String
+  branch            String @default("main")
+  coordinatorModel String @default("coordinator-lite")
+  developerModel   String @default("local-agent")
+  agentCredential  String?
+  toolPermissions  Json @default("{\"fileRead\":true,\"fileWrite\":true,\"shell\":true,\"git\":true,\"tests\":true,\"network\":false}")
+  installCommand   String?
+  frontendCommand  String?
+  backendCommand   String?
+  testCommand      String?
+  rollbackLocked   Boolean @default(false)
+  nextTaskNumber   Int @default(1)
+  nextQueueSequence Int @default(1)
+  createdAt        DateTime @default(now())
+  members          ProjectMember[]
+  messages         Message[]
+  tasks            Task[]
+  rollbackActions  RollbackAction[]
+  activities       ActivityEvent[]
+}
+
+model ProjectMember {
+  projectId       String
+  userId          String
+  role            ProjectRole @default(MEMBER)
+  repositoryWrite Boolean @default(true)
+  createdAt       DateTime @default(now())
+  project         Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user            User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([projectId, userId])
+}
+
+model Message {
+  id               String @id @default(cuid())
+  projectId        String
+  authorId         String
+  body             String
+  replyToMessageId String?
+  createdAt        DateTime @default(now())
+  project          Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  author           User @relation(fields: [authorId], references: [id])
+  replyTo          Message? @relation("MessageReplies", fields: [replyToMessageId], references: [id])
+  replies          Message[] @relation("MessageReplies")
+  rootTask         Task? @relation("TaskRootMessage")
+  taskLinks        TaskMessage[]
+}
+
+model Task {
+  id                String @id @default(cuid())
+  number            Int
+  projectId         String
+  rootMessageId     String @unique
+  parentTaskId      String?
+  type              TaskType
+  status            TaskStatus @default(QUEUED)
+  queuePriority     Int
+  queueSequence     Int
+  requestedByUserId String
+  executorUserId    String?
+  baseCommitSha     String?
+  commitSha         String?
+  amendable         Boolean @default(false)
+  shortStatus       String?
+  diff              Json?
+  failureReason     String?
+  createdAt         DateTime @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+  project           Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rootMessage       Message @relation("TaskRootMessage", fields: [rootMessageId], references: [id])
+  parentTask        Task? @relation("TaskRefinements", fields: [parentTaskId], references: [id])
+  refinements       Task[] @relation("TaskRefinements")
+  requestedBy       User @relation("RequestedTasks", fields: [requestedByUserId], references: [id])
+  executor          User? @relation("ExecutedTasks", fields: [executorUserId], references: [id])
+  taskMessages      TaskMessage[]
+  activities        ActivityEvent[]
+  rollbackActions   RollbackAction[] @relation("RollbackTarget")
+  @@unique([projectId, number])
+  @@index([projectId, queuePriority, queueSequence])
+}
+
+model TaskMessage {
+  taskId    String
+  messageId String @unique
+  role      TaskMessageRole
+  task      Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  @@id([taskId, messageId])
+}
+
+model RollbackAction {
+  id              String @id @default(cuid())
+  projectId       String
+  targetTaskId    String
+  initiatedById   String
+  targetCommitSha String
+  previousHeadSha String?
+  status          String
+  error           String?
+  createdAt       DateTime @default(now())
+  completedAt     DateTime?
+  project         Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  targetTask      Task @relation("RollbackTarget", fields: [targetTaskId], references: [id])
+  initiatedBy     User @relation(fields: [initiatedById], references: [id])
+}
+
+model ActivityEvent {
+  id        String @id @default(cuid())
+  projectId String
+  taskId    String?
+  userId    String?
+  category  String
+  message   String
+  metadata  Json?
+  createdAt DateTime @default(now())
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task      Task? @relation(fields: [taskId], references: [id])
+  user      User? @relation(fields: [userId], references: [id])
+  @@index([projectId, createdAt])
+}
