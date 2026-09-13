@@ -1,12 +1,12 @@
 import { Router } from "express";
-import { activeStatuses, CreateProjectSchema, CreateRefinementSchema, CreateRequestSchema, CreateTeamMessageSchema, InitializeRepositorySchema, ProjectSettingsSchema, RollbackTaskSchema, TaskControlSchema, type GitHistoryResponse, type ListDirectoryResponse, type ReadFileResponse } from "@relaycode/shared";
+import { activeStatuses, CreateProjectSchema, CreateRefinementSchema, CreateRequestSchema, CreateTeamMessageSchema, InitializeRepositorySchema, ProjectSettingsSchema, RollbackTaskSchema, TaskControlSchema } from "@relaycode/shared";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { PrismaClient, TaskStatus } from "@prisma/client";
 import { z } from "zod";
 import { recordActivity } from "./activity.js";
 import { createAuthMiddleware, hashToken, HttpError, safeEqual, type AuthenticatedRequest, requireMember, routeError } from "./auth.js";
 import { githubTokenFor } from "./auth-routes.js";
-import { getGitHubRepository, inferGitHubRepositoryCommands, listGitHubRepositories } from "./github.js";
+import { getGitHubHistory, getGitHubRepository, inferGitHubRepositoryCommands, listGitHubDirectory, listGitHubRepositories, readGitHubFile } from "./github.js";
 import type { RelayServer } from "./realtime.js";
 import type { BrowserPresence } from "./presence.js";
 import { queueDisplayOrder } from "./queue.js";
@@ -350,9 +350,10 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
     try {
       const projectId = pathParam(req, "projectId");
       const userId = req.userId!;
-      await requireMember(prisma, projectId, userId);
+      const member = await requireMember(prisma, projectId, userId);
+      const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
       const path = typeof req.query.path === "string" ? req.query.path : "";
-      const result = await scheduler.connections.requestFromMapped<ListDirectoryResponse>(userId, projectId, "LIST_DIRECTORY", { projectId, path });
+      const result = await listGitHubDirectory(githubTokenFor(member.user), project.repositoryOwner, project.repositoryName, project.branch, path);
       return res.json(result);
     } catch (error) {
       if (error instanceof Error && !(error instanceof HttpError) && !(error instanceof z.ZodError)) return res.status(503).json({ ok: false, error: error.message });
@@ -364,10 +365,11 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
     try {
       const projectId = pathParam(req, "projectId");
       const userId = req.userId!;
-      await requireMember(prisma, projectId, userId);
+      const member = await requireMember(prisma, projectId, userId);
+      const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
       const path = typeof req.query.path === "string" ? req.query.path : "";
       if (!path) throw new HttpError(400, "A file path is required");
-      const result = await scheduler.connections.requestFromMapped<ReadFileResponse>(userId, projectId, "READ_FILE", { projectId, path });
+      const result = await readGitHubFile(githubTokenFor(member.user), project.repositoryOwner, project.repositoryName, project.branch, path);
       return res.json(result);
     } catch (error) {
       if (error instanceof Error && !(error instanceof HttpError) && !(error instanceof z.ZodError)) return res.status(503).json({ ok: false, error: error.message });
@@ -379,8 +381,9 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
     try {
       const projectId = pathParam(req, "projectId");
       const userId = req.userId!;
-      await requireMember(prisma, projectId, userId);
-      const result = await scheduler.connections.requestFromMapped<GitHistoryResponse>(userId, projectId, "GIT_HISTORY", { projectId });
+      const member = await requireMember(prisma, projectId, userId);
+      const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
+      const result = await getGitHubHistory(githubTokenFor(member.user), project.repositoryOwner, project.repositoryName, project.branch);
       return res.json(result);
     } catch (error) {
       if (error instanceof Error && !(error instanceof HttpError) && !(error instanceof z.ZodError)) return res.status(503).json({ ok: false, error: error.message });

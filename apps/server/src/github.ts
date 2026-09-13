@@ -1,6 +1,7 @@
 import { HttpError } from "./auth.js";
 import { commandInferenceContentPaths, inferRepositoryCommands, type RepositoryFile } from "./command-inference.js";
 import { inferCommandsWithAgent } from "./agent-command-inference.js";
+import type { FileEntry, GitBranchInfo, GitCommitInfo, GitHistoryResponse, ListDirectoryResponse, ReadFileResponse } from "@relaycode/shared";
 
 const apiBase = "https://api.github.com";
 
@@ -28,6 +29,25 @@ type GitHubTreeResponse = {
 };
 
 type GitHubContentResponse = { type: string; content?: string; encoding?: string };
+
+type GitHubDirectoryEntry = {
+  name: string;
+  path: string;
+  type: "file" | "dir" | "symlink" | "submodule";
+  size?: number;
+};
+
+type GitHubBranchResponse = { name: string; commit: { sha: string } };
+
+type GitHubCommitResponse = {
+  sha: string;
+  author: { login: string } | null;
+  commit: {
+    message: string;
+    author: { name: string; date: string } | null;
+    committer: { name: string; date: string } | null;
+  };
+};
 
 async function githubFetch<T>(path: string, token: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
@@ -91,6 +111,93 @@ export async function getGitHubRepository(token: string, owner: string, name: st
   return serializeRepository(await githubFetch<GitHubRepoResponse>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, token));
 }
 
+/**
+ * Read-only repository browsing deliberately uses the configured remote branch.
+ * The remote repository is Relaycode's source of truth and this also keeps the
+ * Files and History panels independent from a particular Companion version.
+ */
+export async function listGitHubDirectory(
+  token: string,
+  owner: string,
+  name: string,
+  branch: string,
+  path = "",
+): Promise<ListDirectoryResponse> {
+  const repositoryPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+  const contentPath = path ? `/${encodeRepositoryPath(path)}` : "";
+  const result = await githubFetch<GitHubDirectoryEntry | GitHubDirectoryEntry[]>(
+    `${repositoryPath}/contents${contentPath}?ref=${encodeURIComponent(branch)}`,
+    token,
+  );
+  if (!Array.isArray(result)) return { ok: false, error: "That path is not a directory." };
+  const entries: FileEntry[] = result
+    .filter((entry) => entry.type === "file" || entry.type === "dir")
+    .map((entry) => ({
+      name: entry.name,
+      path: entry.path,
+      type: entry.type === "dir" ? "directory" as const : "file" as const,
+      ...(entry.type === "file" && typeof entry.size === "number" ? { size: entry.size } : {}),
+    }))
+    .sort((left, right) => left.type !== right.type
+      ? (left.type === "directory" ? -1 : 1)
+      : left.name.localeCompare(right.name));
+  return { ok: true, path, entries };
+}
+
+export async function readGitHubFile(
+  token: string,
+  owner: string,
+  name: string,
+  branch: string,
+  path: string,
+): Promise<ReadFileResponse> {
+  const repositoryPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+  const file = await githubFetch<GitHubContentResponse>(
+    `${repositoryPath}/contents/${encodeRepositoryPath(path)}?ref=${encodeURIComponent(branch)}`,
+    token,
+  );
+  if (file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string") {
+    return { ok: false, error: "That path is not a file." };
+  }
+  const maxBytes = 1_000_000;
+  const bytes = Buffer.from(file.content.replace(/\s/g, ""), "base64");
+  if (isLikelyBinary(bytes)) return { ok: true, path, content: "", truncated: false, binary: true };
+  return {
+    ok: true,
+    path,
+    content: bytes.subarray(0, maxBytes).toString("utf8"),
+    truncated: bytes.length > maxBytes,
+    binary: false,
+  };
+}
+
+export async function getGitHubHistory(
+  token: string,
+  owner: string,
+  name: string,
+  branch: string,
+): Promise<GitHistoryResponse> {
+  const repositoryPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+  const [branchResults, commitResults] = await Promise.all([
+    githubFetch<GitHubBranchResponse[]>(`${repositoryPath}/branches?per_page=100`, token),
+    githubFetch<GitHubCommitResponse[]>(`${repositoryPath}/commits?sha=${encodeURIComponent(branch)}&per_page=100`, token),
+  ]);
+  const selectedHead = branchResults.find((item) => item.name === branch)?.commit.sha;
+  const branches: GitBranchInfo[] = branchResults.map((item) => ({
+    name: item.name,
+    current: item.name === branch,
+    remote: true,
+  }));
+  const commits: GitCommitInfo[] = commitResults.map((item) => ({
+    sha: item.sha,
+    author: item.author?.login ?? item.commit.author?.name ?? item.commit.committer?.name ?? "Unknown",
+    date: item.commit.author?.date ?? item.commit.committer?.date ?? "",
+    message: item.commit.message.split("\n", 1)[0] ?? "",
+    refs: item.sha === selectedHead ? [`origin/${branch}`] : [],
+  }));
+  return { ok: true, branches, commits };
+}
+
 export async function inferGitHubRepositoryCommands(
   token: string,
   owner: string,
@@ -127,4 +234,16 @@ function serializeRepository(repo: GitHubRepoResponse): GitHubRepository {
     canRead: Boolean(repo.permissions?.pull ?? true),
     canWrite: Boolean(repo.permissions?.push || repo.permissions?.admin || repo.permissions?.maintain),
   };
+}
+
+function encodeRepositoryPath(path: string) {
+  return path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+}
+
+function isLikelyBinary(buffer: Buffer) {
+  const sampleLength = Math.min(buffer.length, 8_000);
+  for (let index = 0; index < sampleLength; index += 1) {
+    if (buffer[index] === 0) return true;
+  }
+  return false;
 }

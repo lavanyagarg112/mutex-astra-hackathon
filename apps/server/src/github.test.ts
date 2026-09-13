@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getGitHubRepository, inferGitHubRepositoryCommands, listGitHubRepositories } from "./github.js";
+import { getGitHubHistory, getGitHubRepository, inferGitHubRepositoryCommands, listGitHubDirectory, listGitHubRepositories, readGitHubFile } from "./github.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -75,5 +75,48 @@ describe("GitHub repository access", () => {
     });
     expect(fetchMock.mock.calls[0]?.[0]).toContain("/git/trees/feature%2Fdemo?recursive=1");
     expect(fetchMock.mock.calls[1]?.[0]).toContain("/contents/package.json?ref=feature%2Fdemo");
+  });
+
+  it("lists and reads canonical branch files without a local companion", async () => {
+    const source = Buffer.from("export const ready = true;\n").toString("base64");
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify([
+        { name: "src", path: "src", type: "dir", size: 0 },
+        { name: "README.md", path: "README.md", type: "file", size: 12 },
+      ]), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ type: "file", encoding: "base64", content: source }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listGitHubDirectory("token", "relay", "code", "feature/demo")).resolves.toEqual({
+      ok: true,
+      path: "",
+      entries: [
+        { name: "src", path: "src", type: "directory" },
+        { name: "README.md", path: "README.md", type: "file", size: 12 },
+      ],
+    });
+    await expect(readGitHubFile("token", "relay", "code", "feature/demo", "src/index.ts")).resolves.toMatchObject({
+      ok: true,
+      content: "export const ready = true;\n",
+      binary: false,
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toContain("/contents?ref=feature%2Fdemo");
+    expect(fetchMock.mock.calls[1]?.[0]).toContain("/contents/src/index.ts?ref=feature%2Fdemo");
+  });
+
+  it("loads canonical branch history without a local companion", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ name: "main", commit: { sha: "abc123" } }]), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{
+        sha: "abc123",
+        author: { login: "alice" },
+        commit: { message: "Ship files panel\n\nDetails", author: { name: "Alice", date: "2026-09-13T12:00:00Z" }, committer: null },
+      }]), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await expect(getGitHubHistory("token", "relay", "code", "main")).resolves.toEqual({
+      ok: true,
+      branches: [{ name: "main", current: true, remote: true }],
+      commits: [{ sha: "abc123", author: "alice", date: "2026-09-13T12:00:00Z", message: "Ship files panel", refs: ["origin/main"] }],
+    });
   });
 });
