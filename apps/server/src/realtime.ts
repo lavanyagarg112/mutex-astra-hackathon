@@ -93,6 +93,21 @@ export class ConnectionRegistry {
     return true;
   }
 
+  /** Round-trips a request to the requester's own connected daemon and awaits its acknowledgement. */
+  requestFromMapped<T>(userId: string, projectId: string, event: keyof ServerToClientEvents, payload: unknown, timeoutMs = 8_000): Promise<T> {
+    const session = this.userSessions(userId).find((item) => item.mappings.has(projectId));
+    if (!session) return Promise.reject(new Error("Your local companion is not connected for this project."));
+    return new Promise<T>((resolve, reject) => {
+      const withTimeout = session.socket as unknown as {
+        timeout: (ms: number) => { emit: (name: string, value: unknown, callback: (err: Error | null, response: T) => void) => void };
+      };
+      withTimeout.timeout(timeoutMs).emit(event, payload, (err, response) => {
+        if (err) reject(new Error("Your local companion did not respond in time."));
+        else resolve(response);
+      });
+    });
+  }
+
   syncAllProjectMembers(projectId: string, payload: SyncProjectPayload) {
     const users = new Set<string>();
     for (const session of this.sessions.values()) {

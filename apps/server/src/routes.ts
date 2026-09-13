@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { activeStatuses, CreateProjectSchema, CreateRefinementSchema, CreateRequestSchema, CreateTeamMessageSchema, InitializeRepositorySchema, ProjectSettingsSchema, RollbackTaskSchema, TaskControlSchema } from "@relaycode/shared";
+import { activeStatuses, CreateProjectSchema, CreateRefinementSchema, CreateRequestSchema, CreateTeamMessageSchema, InitializeRepositorySchema, ProjectSettingsSchema, RollbackTaskSchema, TaskControlSchema, type GitHistoryResponse, type ListDirectoryResponse, type ReadFileResponse } from "@relaycode/shared";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { PrismaClient, TaskStatus } from "@prisma/client";
 import { z } from "zod";
@@ -344,6 +344,48 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
       }
       return res.status(202).json({ stopped: [payload.name] });
     } catch (error) { return routeError(res, error); }
+  });
+
+  router.get("/projects/:projectId/files", async (req: AuthenticatedRequest, res) => {
+    try {
+      const projectId = pathParam(req, "projectId");
+      const userId = req.userId!;
+      await requireMember(prisma, projectId, userId);
+      const path = typeof req.query.path === "string" ? req.query.path : "";
+      const result = await scheduler.connections.requestFromMapped<ListDirectoryResponse>(userId, projectId, "LIST_DIRECTORY", { projectId, path });
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof Error && !(error instanceof HttpError) && !(error instanceof z.ZodError)) return res.status(503).json({ ok: false, error: error.message });
+      return routeError(res, error);
+    }
+  });
+
+  router.get("/projects/:projectId/files/content", async (req: AuthenticatedRequest, res) => {
+    try {
+      const projectId = pathParam(req, "projectId");
+      const userId = req.userId!;
+      await requireMember(prisma, projectId, userId);
+      const path = typeof req.query.path === "string" ? req.query.path : "";
+      if (!path) throw new HttpError(400, "A file path is required");
+      const result = await scheduler.connections.requestFromMapped<ReadFileResponse>(userId, projectId, "READ_FILE", { projectId, path });
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof Error && !(error instanceof HttpError) && !(error instanceof z.ZodError)) return res.status(503).json({ ok: false, error: error.message });
+      return routeError(res, error);
+    }
+  });
+
+  router.get("/projects/:projectId/git/history", async (req: AuthenticatedRequest, res) => {
+    try {
+      const projectId = pathParam(req, "projectId");
+      const userId = req.userId!;
+      await requireMember(prisma, projectId, userId);
+      const result = await scheduler.connections.requestFromMapped<GitHistoryResponse>(userId, projectId, "GIT_HISTORY", { projectId });
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof Error && !(error instanceof HttpError) && !(error instanceof z.ZodError)) return res.status(503).json({ ok: false, error: error.message });
+      return routeError(res, error);
+    }
   });
 
   async function control(req: AuthenticatedRequest, res: Parameters<typeof routeError>[0], method: "pause" | "resume" | "cancel") {

@@ -139,6 +139,19 @@ export const RollbackResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), projectId: z.string(), message: z.string() }),
 ]);
 
+export type FileEntry = { name: string; path: string; type: "file" | "directory"; size?: number };
+export type ListDirectoryResponse =
+  | { ok: true; path: string; entries: FileEntry[] }
+  | { ok: false; error: string };
+export type ReadFileResponse =
+  | { ok: true; path: string; content: string; truncated: boolean; binary: boolean }
+  | { ok: false; error: string };
+export type GitBranchInfo = { name: string; current: boolean; remote: boolean };
+export type GitCommitInfo = { sha: string; author: string; date: string; message: string; refs: string[] };
+export type GitHistoryResponse =
+  | { ok: true; branches: GitBranchInfo[]; commits: GitCommitInfo[] }
+  | { ok: false; error: string };
+
 /** agentCredential is delivered only to the assigned daemon and is never part of serialized Project data. */
 export type StartTaskPayload = { task: Task; project: Project; request: string; refinements: string[]; agentCredential?: string };
 export type AmendTaskPayload = { taskId: string; projectId: string; messageId: string; body: string; authorName: string; kind: "COMBINED_REQUEST" | "IN_FLIGHT_REFINEMENT" };
@@ -181,6 +194,9 @@ export interface ServerToClientEvents {
   STOP_LOCAL_PROCESS: (payload: { projectId: string; name: string }) => void;
   START_LOCAL_PREVIEW: (payload: { projectId: string; installCommand?: string; frontendCommand?: string; backendCommand?: string }) => void;
   STOP_LOCAL_PREVIEW: (payload: { projectId: string }) => void;
+  LIST_DIRECTORY: (payload: { projectId: string; path: string }, callback: (response: ListDirectoryResponse) => void) => void;
+  READ_FILE: (payload: { projectId: string; path: string }, callback: (response: ReadFileResponse) => void) => void;
+  GIT_HISTORY: (payload: { projectId: string }, callback: (response: GitHistoryResponse) => void) => void;
   QUEUE_UPDATED: (payload: { projectId: string }) => void;
   TASK_UPDATED: (payload: { projectId: string; taskId: string }) => void;
   MESSAGE_CREATED: (payload: { projectId: string; messageId: string }) => void;
