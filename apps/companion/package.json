@@ -1,6 +1,12 @@
 {
   "name": "@relaycode/companion",
   "version": "0.1.0",
+  "description": "Local companion for Relaycode collaborative AI-assisted development.",
+  "homepage": "https://github.com/lavanyagarg112/astra-code-chat",
+  "author": {
+    "name": "Relaycode",
+    "email": "lavanyagarg@u.nus.edu"
+  },
   "private": true,
   "type": "module",
   "main": "dist/apps/companion/src/main.js",

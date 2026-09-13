@@ -10,6 +10,7 @@ import { fullTaskInclude, serializeProject, serializeTask } from "./serialize.js
 
 const ACTIVE = activeStatuses as TaskStatus[];
 const MISSING_AGENT_KEY = "No OpenAI key is configured for this project. A project owner must add the shared key in Project settings → Agent before coding requests can run.";
+const COORDINATOR_MERGE_CONFIDENCE = 0.8;
 
 function usesSharedOpenAI(developerModel: string): boolean {
   return !["demo", "command"].includes(developerModel);
@@ -41,7 +42,13 @@ export class Scheduler {
     await requireMember(this.prisma, projectId, userId, { write: true });
     const active = await this.prisma.task.findFirst({
       where: { projectId, status: { in: ACTIVE } },
-      include: { rootMessage: true },
+      include: {
+        rootMessage: true,
+        taskMessages: {
+          where: { role: "IN_FLIGHT_REFINEMENT" },
+          include: { message: true },
+        },
+      },
     });
     if (active?.amendable) {
       const project = await this.prisma.project.findUnique({
@@ -49,9 +56,16 @@ export class Scheduler {
         select: { agentCredential: true, coordinatorModel: true },
       });
       const decision = project?.agentCredential
-        ? await this.coordinator.classify({ incoming: body, activeRequest: active.rootMessage.body, apiKey: project.agentCredential, model: project.coordinatorModel })
+        ? await this.coordinator.classify({
+            incoming: body,
+            activeRequest: active.rootMessage.body,
+            activeStatus: active.shortStatus,
+            existingRefinements: active.taskMessages.map((link) => link.message.body),
+            apiKey: project.agentCredential,
+            model: project.coordinatorModel,
+          })
         : { kind: "INDEPENDENT" as const, confidence: 0, reason: "No shared OpenAI credential configured" };
-      if (decision.kind === "REFINEMENT" && decision.confidence >= 0.85) {
+      if (decision.kind === "REFINEMENT" && decision.confidence >= COORDINATOR_MERGE_CONFIDENCE) {
         return this.attachInFlightRefinement(userId, active.id, body);
       }
     }

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { realpath } from "node:fs/promises";
+import { createServer } from "node:net";
 import { relative, resolve, sep } from "node:path";
 import type { Socket } from "socket.io-client";
 import type { ClientToServerEvents, ServerToClientEvents } from "@relaycode/shared";
@@ -10,10 +11,14 @@ type RelaySocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 type ProcessStatus = "starting" | "running" | "stopped" | "failed";
 
 /** Extract a browser-reachable loopback URL from common dev-server output. */
-export function localPreviewUrl(output: string): string | undefined {
+export function localPreviewUrl(output: string, fallbackPort?: number): string | undefined {
   const plain = output.replace(/\u001b\[[0-9;]*m/g, "");
   const match = plain.match(/https?:\/\/(?:localhost|127(?:\.\d+){3}|0\.0\.0\.0|\[::1?\]):\d+(?:\/[^\s]*)?/i)?.[0];
-  if (!match) return undefined;
+  if (!match) {
+    const reportedPort = plain.match(/\b(?:listening|running|started|ready)\b[^\n]{0,80}?\b(?:port\s+|localhost:|127\.0\.0\.1:)(\d{2,5})\b/i)?.[1];
+    const port = reportedPort ? Number(reportedPort) : fallbackPort && /\b(?:listening|running|started|ready)\b/i.test(plain) ? fallbackPort : undefined;
+    return port && port <= 65_535 ? `http://localhost:${port}/` : undefined;
+  }
   try {
     const url = new URL(match.replace(/[),.;]+$/, ""));
     if (url.hostname === "0.0.0.0" || url.hostname === "[::]" || url.hostname === "[::1]") url.hostname = "localhost";
@@ -21,6 +26,50 @@ export function localPreviewUrl(output: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function appendArgument(command: string, argument: string): string {
+  return /\)\s*$/.test(command) ? command.replace(/\)\s*$/, ` ${argument})`) : `${command} ${argument}`;
+}
+
+/** Override explicit framework ports and add a port flag where it is supported. */
+export function commandWithPreviewPort(command: string, port: number): string {
+  let result = command
+    .replace(/(\bPORT\s*=\s*)\d+/gi, `$1${port}`)
+    .replace(/(--port(?:=|\s+))\d+/gi, `$1${port}`)
+    .replace(/(\s-p\s+)\d+/g, `$1${port}`)
+    .replace(/(runserver\s+)(?:[\w.-]+:)?\d+/gi, `$1127.0.0.1:${port}`)
+    .replace(/(--bind\s+)(?:[\w.-]+:)?\d+/gi, `$1127.0.0.1:${port}`);
+  if (result !== command) return result;
+  if (/\b(?:uvicorn|flask\s+run)\b/i.test(result)) return appendArgument(result, `--port ${port}`);
+  if (/\b(?:vite|next\s+(?:dev|start))\b/i.test(result)) return appendArgument(result, `--port ${port}`);
+  if (/\bmanage\.py\s+runserver\b/i.test(result)) return appendArgument(result, `127.0.0.1:${port}`);
+  if (/\b(?:gunicorn|hypercorn)\b/i.test(result)) return appendArgument(result, `--bind 127.0.0.1:${port}`);
+  return result;
+}
+
+async function portIsAvailable(port: number): Promise<boolean> {
+  return new Promise((accept) => {
+    const probe = createServer();
+    probe.unref();
+    probe.once("error", () => accept(false));
+    probe.listen({ host: "127.0.0.1", port, exclusive: true }, () => probe.close(() => accept(true)));
+  });
+}
+
+export async function availablePreviewPort(preferred: number, excluded: ReadonlySet<number> = new Set()): Promise<number> {
+  for (let offset = 0; offset < 2_000; offset += 1) {
+    const candidate = preferred + offset;
+    if (candidate > 65_535) break;
+    if (!excluded.has(candidate) && await portIsAvailable(candidate)) return candidate;
+  }
+  throw new Error("No free local port is available for this preview.");
+}
+
+function projectPort(projectId: string, base: number): number {
+  let hash = 0;
+  for (const character of projectId) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return base + (hash % 1_000);
 }
 
 export class LocalProcessManager {
@@ -41,15 +90,26 @@ export class LocalProcessManager {
         return;
       }
     }
-    if (commands.backendCommand) await this.start(projectId, "backend", commands.backendCommand);
-    if (commands.frontendCommand) await this.start(projectId, "frontend", commands.frontendCommand);
+    const allocated = new Set<number>();
+    if (commands.backendCommand) {
+      const port = await availablePreviewPort(projectPort(projectId, 8_000), allocated);
+      allocated.add(port);
+      this.activity(projectId, `backend preview allocated localhost:${port}`);
+      await this.start(projectId, "backend", commands.backendCommand, undefined, port);
+    }
+    if (commands.frontendCommand) {
+      const port = await availablePreviewPort(projectPort(projectId, 3_000), allocated);
+      allocated.add(port);
+      this.activity(projectId, `frontend preview allocated localhost:${port}`);
+      await this.start(projectId, "frontend", commands.frontendCommand, undefined, port);
+    }
   }
 
   async stopPreview(projectId: string): Promise<void> {
     await Promise.all(["install", "frontend", "backend"].map((name) => this.stop(projectId, name)));
   }
 
-  async start(projectId: string, name: string, command: string, cwd?: string): Promise<void> {
+  async start(projectId: string, name: string, command: string, cwd?: string, previewPort?: number): Promise<void> {
     const binding = this.config.projects[projectId];
     if (!binding) {
       this.emit(projectId, name, "failed");
@@ -64,26 +124,27 @@ export class LocalProcessManager {
       throw new Error("Local process working directory escapes the configured repository.");
     }
 
-    const child = spawn(command, {
+    const runtimeCommand = previewPort ? commandWithPreviewPort(command, previewPort) : command;
+    const child = spawn(runtimeCommand, {
       cwd: actualWorkingDirectory,
-      env: process.env,
+      env: previewPort ? { ...process.env, PORT: String(previewPort), VITE_PORT: String(previewPort), NEXT_PORT: String(previewPort), FLASK_RUN_PORT: String(previewPort), RELAYCODE_PREVIEW_PORT: String(previewPort) } : process.env,
       shell: true,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
     const key = this.key(projectId, name);
     this.processes.set(key, child);
-    this.emit(projectId, name, "starting");
+    this.emit(projectId, name, "starting", undefined, previewPort);
     let discoveredUrl: string | undefined;
     let urlScanTail = "";
     const consume = (chunk: Buffer) => {
       const output = sanitizeText(chunk.toString("utf8"));
       const scanned = `${urlScanTail}${output}`;
       urlScanTail = scanned.slice(-500);
-      const url = localPreviewUrl(scanned);
+      const url = localPreviewUrl(scanned, previewPort);
       if (url && url !== discoveredUrl) {
         discoveredUrl = url;
-        this.emit(projectId, name, "running", url);
+        this.emit(projectId, name, "running", url, previewPort);
       }
       this.socket.emit("ACTIVITY_EVENT", {
         projectId,
@@ -93,14 +154,14 @@ export class LocalProcessManager {
     };
     child.stdout?.on("data", consume);
     child.stderr?.on("data", consume);
-    child.once("spawn", () => this.emit(projectId, name, "running", discoveredUrl));
+    child.once("spawn", () => this.emit(projectId, name, "running", discoveredUrl, previewPort));
     child.once("error", (error) => {
       this.socket.emit("ACTIVITY_EVENT", { projectId, category: "PROCESS", message: `${name} failed: ${sanitizeText(error.message)}` });
-      this.emit(projectId, name, "failed");
+      this.emit(projectId, name, "failed", undefined, previewPort);
     });
     child.once("close", (code) => {
       if (this.processes.get(key) === child) this.processes.delete(key);
-      this.emit(projectId, name, code === 0 ? "stopped" : "failed", discoveredUrl);
+      this.emit(projectId, name, code === 0 ? "stopped" : "failed", discoveredUrl, previewPort);
     });
   }
 
@@ -190,8 +251,8 @@ export class LocalProcessManager {
     this.socket.emit("ACTIVITY_EVENT", { projectId, category: "PROCESS", message });
   }
 
-  private emit(projectId: string, name: string, status: ProcessStatus, url?: string): void {
-    let port: number | undefined;
+  private emit(projectId: string, name: string, status: ProcessStatus, url?: string, assignedPort?: number): void {
+    let port = assignedPort;
     if (url) {
       try { port = Number(new URL(url).port); } catch { /* malformed process output is ignored */ }
     }

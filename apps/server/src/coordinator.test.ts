@@ -13,6 +13,8 @@ describe("OpenAICoordinator", () => {
     const decision = await new OpenAICoordinator().classify({
       activeRequest: "Add sign in",
       incoming: "Redirect to the dashboard afterward",
+      activeStatus: "Editing the authentication callback",
+      existingRefinements: ["Keep the existing password login"],
       apiKey: "test-key",
       model: "gpt-5-mini",
     });
@@ -20,6 +22,7 @@ describe("OpenAICoordinator", () => {
     expect(decision).toEqual({ kind: "REFINEMENT", confidence: 0.94, reason: "It changes the active feature." });
     const request = JSON.parse(fetchMock.mock.calls[0]![1]!.body as string) as { model: string; store: boolean; text: { format: { type: string } } };
     expect(request).toMatchObject({ model: "gpt-5-mini", store: false, text: { format: { type: "json_schema" } } });
+    expect(JSON.stringify(request)).toContain("Editing the authentication callback");
   });
 
   it("keeps work separate when OpenAI is unavailable", async () => {
