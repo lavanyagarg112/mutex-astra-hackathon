@@ -48,7 +48,7 @@ export function PixelAvatar({
 
 type CrewMember = Pick<User, "id" | "name" | "pixelCharacter"> & { present?: boolean };
 
-type Reaction = { kind: "punch" | "love" | "excited"; ts: number };
+type Reaction = { kind: "excited"; ts: number };
 
 export function PixelCrew({
   members,
@@ -67,7 +67,7 @@ export function PixelCrew({
 
   useEffect(() => {
     if (!socket) return;
-    const handler = (payload: { projectId: string; fromUserId: string; targetUserId: string; kind: "punch" | "love" | "excited" }) => {
+    const handler = (payload: { projectId: string; fromUserId: string; targetUserId: string; kind: "excited" }) => {
       if (payload.projectId !== projectId) return;
       setReactions((current) => ({ ...current, [payload.targetUserId]: { kind: payload.kind, ts: Date.now() } }));
       window.setTimeout(() => {
@@ -95,23 +95,18 @@ export function PixelCrew({
     return "running";
   };
 
-  const sendInteraction = (targetUserId: string, kind: "punch" | "love" | "excited") => {
+  const sendInteraction = (targetUserId: string, kind: "excited") => {
     socket?.emit("MEMBER_INTERACTION", { projectId, targetUserId, kind });
   };
 
   return (
     <div className="pointer-events-none fixed bottom-4 right-4 z-[65] flex items-end gap-2">
       {members.map((member) => {
-        const isActive = member.id === activeUserId;
         const isSelf = member.id === currentUserId;
         const reaction = reactions[member.id];
         const pose = poseFor(member.id);
         const poseClass = reaction
-          ? reaction.kind === "punch"
-            ? "pixel-pose-punched"
-            : reaction.kind === "love"
-              ? "pixel-pose-loved"
-              : "pixel-pose-excited"
+          ? "pixel-pose-excited"
           : pose === "running"
             ? "pixel-pose-running"
             : pose === "verifying"
@@ -134,26 +129,6 @@ export function PixelCrew({
                     member.present ? "bg-emerald-500" : "bg-zinc-300",
                   ].join(" ")}
                 />
-              )}
-              {isActive && (
-                <div className="absolute inset-0 hidden items-center justify-center gap-1 rounded-xl bg-black/45 group-hover:flex">
-                  <button
-                    type="button"
-                    title="Punch"
-                    onClick={() => sendInteraction(member.id, "punch")}
-                    className="grid size-6 place-items-center rounded-full bg-white text-[11px] leading-none"
-                  >
-                    👊
-                  </button>
-                  <button
-                    type="button"
-                    title="Send love"
-                    onClick={() => sendInteraction(member.id, "love")}
-                    className="grid size-6 place-items-center rounded-full bg-white text-[11px] leading-none"
-                  >
-                    ❤️
-                  </button>
-                </div>
               )}
             </div>
             <span className="mt-0.5 max-w-[60px] truncate text-center text-[8px] font-medium text-zinc-500">
