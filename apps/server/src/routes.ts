@@ -1,9 +1,11 @@
 import { Router } from "express";
 import { activeStatuses, CreateProjectSchema, CreateRefinementSchema, CreateRequestSchema, ProjectSettingsSchema, RollbackTaskSchema, TaskControlSchema } from "@relaycode/shared";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { PrismaClient, TaskStatus } from "@prisma/client";
 import { z } from "zod";
-import { demoAuth, HttpError, type AuthenticatedRequest, requireMember, routeError } from "./auth.js";
+import { createAuthMiddleware, hashToken, HttpError, safeEqual, type AuthenticatedRequest, requireMember, routeError } from "./auth.js";
+import { githubTokenFor } from "./auth-routes.js";
+import { getGitHubRepository, inferGitHubRepositoryCommands, listGitHubRepositories } from "./github.js";
 import type { RelayServer } from "./realtime.js";
 import { queueDisplayOrder } from "./queue.js";
 import { RuntimeState } from "./runtime.js";
@@ -11,11 +13,67 @@ import { Scheduler } from "./scheduler.js";
 import { fullTaskInclude, serializeActivity, serializeProject, serializeTask, serializeUser } from "./serialize.js";
 
 const ExtendedProjectSettingsSchema = ProjectSettingsSchema;
-const ProcessControlSchema = z.object({ name: z.enum(["install", "frontend", "backend", "test"]), cwd: z.string().optional() });
+const ProcessControlSchema = z.object({ name: z.enum(["install", "frontend", "backend", "test", "preview"]), cwd: z.string().optional() });
 
 export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler: Scheduler, runtime: RuntimeState) {
   const router = Router();
-  router.use(demoAuth);
+
+  router.post("/companion/pair/claim", async (req, res) => {
+    try {
+      const code = z.string().trim().min(6).max(32).parse(req.body?.code).toUpperCase();
+      const pairing = await prisma.companionPairing.findUnique({ where: { codeHash: hashToken(code) } });
+      if (!pairing || pairing.claimedAt || pairing.expiresAt <= new Date()) throw new HttpError(400, "This companion pairing code is invalid or expired.");
+      const daemonToken = randomBytes(32).toString("base64url");
+      const pairedUser = await prisma.user.findUniqueOrThrow({ where: { id: pairing.userId }, select: { githubToken: true } });
+      await prisma.$transaction(async (tx) => {
+        const claimed = await tx.companionPairing.updateMany({ where: { id: pairing.id, claimedAt: null, expiresAt: { gt: new Date() } }, data: { claimedAt: new Date() } });
+        if (claimed.count !== 1) throw new HttpError(409, "This companion pairing code has already been used.");
+        await tx.user.update({ where: { id: pairing.userId }, data: { daemonTokenHash: hashToken(daemonToken) } });
+      });
+      return res.json({
+        userId: pairing.userId,
+        daemonToken,
+        serverUrl: process.env.PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 4100}`,
+        ...(pairedUser.githubToken ? { githubToken: githubTokenFor(pairedUser) } : {}),
+      });
+    } catch (error) { return routeError(res, error); }
+  });
+
+  // The desktop companion cannot carry a browser session cookie. Its opaque
+  // daemon token is issued only once during pairing and remains on the user's
+  // computer, so it can safely discover projects after a restart.
+  router.get("/companion/projects", async (req, res) => {
+    try {
+      const userId = typeof req.headers["x-relaycode-user-id"] === "string" ? req.headers["x-relaycode-user-id"] : undefined;
+      const token = typeof req.headers["x-relaycode-daemon-token"] === "string" ? req.headers["x-relaycode-daemon-token"] : undefined;
+      if (!userId || !token) throw new HttpError(401, "Pair this companion from Relaycode before loading projects.");
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { daemonTokenHash: true } });
+      if (!user?.daemonTokenHash || !safeEqual(user.daemonTokenHash, hashToken(token))) throw new HttpError(401, "This companion is no longer paired. Pair it again from Relaycode.");
+      const memberships = await prisma.projectMember.findMany({
+        where: { userId }, include: { project: true }, orderBy: { createdAt: "asc" },
+      });
+      return res.json({ projects: memberships.map(({ project }) => serializeProject(project)) });
+    } catch (error) { return routeError(res, error); }
+  });
+
+  router.use(createAuthMiddleware(prisma));
+
+  router.post("/companion/pair/start", async (req: AuthenticatedRequest, res) => {
+    try {
+      await prisma.companionPairing.deleteMany({ where: { OR: [{ userId: req.userId! }, { expiresAt: { lte: new Date() } }] } });
+      const code = randomBytes(16).toString("hex").toUpperCase();
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+      await prisma.companionPairing.create({ data: { codeHash: hashToken(code), userId: req.userId!, expiresAt } });
+      return res.status(201).json({ code, expiresAt: expiresAt.toISOString() });
+    } catch (error) { return routeError(res, error); }
+  });
+
+  router.get("/github/repositories", async (req: AuthenticatedRequest, res) => {
+    try {
+      const user = await prisma.user.findUniqueOrThrow({ where: { id: req.userId! }, select: { githubToken: true } });
+      return res.json({ repositories: await listGitHubRepositories(githubTokenFor(user)) });
+    } catch (error) { return routeError(res, error); }
+  });
 
   router.get("/bootstrap", async (req: AuthenticatedRequest, res) => {
     try {
@@ -35,7 +93,7 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
       const memberships = await prisma.projectMember.findMany({ where: { userId: user.id }, include: { project: true }, orderBy: { createdAt: "asc" } });
       return res.json({
         user: serializeUser(user),
-        github: { username: user.username, connected: true },
+        github: { username: user.githubLogin ?? user.username, connected: Boolean(user.githubId && user.githubToken) },
         localCompanion: { online: scheduler.connections.isOnline(user.id), gitCredentialConfigured: scheduler.connections.isOnline(user.id) },
         mappings: memberships.map(({ project }) => ({ projectId: project.id, projectName: project.name, ...scheduler.connections.statusFor(user.id, project.id) })),
       });
@@ -61,7 +119,9 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
         queue: ordered.filter((task) => ["QUEUED", "WAITING_FOR_REQUESTER"].includes(task.status)).map(serializeTask),
         members: members.map(({ user, role, repositoryWrite }) => ({ ...serializeUser(user), role, repositoryWrite, daemon: scheduler.connections.statusFor(user.id, project.id) })),
         activities: activities.reverse().map(serializeActivity),
-        processes: runtime.projectProcesses(project.id),
+        // localhost belongs to the signed-in user's machine, so never return a
+        // different member's preview process to this browser.
+        processes: runtime.projectProcesses(project.id).filter((process) => process.userId === req.userId!),
         rollbackActions: rollbackActions.map((action) => ({ ...action, createdAt: action.createdAt.toISOString(), completedAt: action.completedAt?.toISOString() ?? null, initiatedBy: serializeUser(action.initiatedBy) })),
       });
     } catch (error) { return routeError(res, error); }
@@ -71,6 +131,21 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
     try {
       const payload = CreateProjectSchema.parse(req.body);
       const repository = parseRepository(payload.repositoryUrl);
+      const user = await prisma.user.findUniqueOrThrow({ where: { id: req.userId! }, select: { githubToken: true } });
+      let inferredCommands: Awaited<ReturnType<typeof inferGitHubRepositoryCommands>> | null = null;
+      if (user.githubToken) {
+        const githubToken = githubTokenFor(user);
+        const githubRepository = await getGitHubRepository(githubToken, repository.owner, repository.name);
+        if (!githubRepository.canWrite) throw new HttpError(403, `Your GitHub account does not have write access to ${githubRepository.fullName}.`);
+        try {
+          inferredCommands = await inferGitHubRepositoryCommands(githubToken, repository.owner, repository.name, payload.branch);
+        } catch {
+          // Command detection is a convenience and must not prevent creating an
+          // otherwise valid project (for example, an empty repository).
+        }
+      } else if (req.authMethod === "session") {
+        throw new HttpError(409, "Reconnect GitHub before creating a project.");
+      }
       const slugBase = payload.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
       const id = `project-${randomUUID()}`;
       const project = await prisma.project.create({ data: {
@@ -81,11 +156,31 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
         repositoryName: repository.name,
         repositoryUrl: payload.repositoryUrl,
         branch: payload.branch,
-        testCommand: payload.testCommand,
+        installCommand: inferredCommands?.installCommand,
+        frontendCommand: inferredCommands?.frontendCommand,
+        backendCommand: inferredCommands?.backendCommand,
+        testCommand: payload.testCommand ?? inferredCommands?.testCommand,
         members: { create: { userId: req.userId!, role: "OWNER", repositoryWrite: true } },
       } });
       await recordProjectCreated(prisma, project.id, req.userId!);
       return res.status(201).json({ project: serializeProject(project) });
+    } catch (error) { return routeError(res, error); }
+  });
+
+  router.post("/projects/:projectId/join", async (req: AuthenticatedRequest, res) => {
+    try {
+      const projectId = pathParam(req, "projectId");
+      const project = await prisma.project.findUnique({ where: { id: projectId } });
+      if (!project) throw new HttpError(404, "Project not found. Check the invite link and try again.");
+      const existing = await prisma.projectMember.findUnique({ where: { projectId_userId: { projectId, userId: req.userId! } } });
+      if (existing) return res.json({ project: serializeProject(project), membership: { role: existing.role, repositoryWrite: existing.repositoryWrite } });
+      const user = await prisma.user.findUniqueOrThrow({ where: { id: req.userId! }, select: { githubToken: true } });
+      if (!user.githubToken) throw new HttpError(403, `Connect GitHub to prove that you have access to ${project.repositoryOwner}/${project.repositoryName}.`);
+      const repository = await getGitHubRepository(githubTokenFor(user), project.repositoryOwner, project.repositoryName);
+      if (!repository.canWrite) throw new HttpError(403, `You cannot join this project because your GitHub account does not have write access to ${repository.fullName}. Ask a repository administrator to grant access, then try again.`);
+      const membership = await prisma.projectMember.create({ data: { projectId, userId: req.userId!, role: "MEMBER", repositoryWrite: true } });
+      io.to(`project:${project.id}:web`).emit("MEMBER_STATUS_CHANGED", { projectId: project.id, userId: req.userId!, online: scheduler.connections.isOnline(req.userId!) });
+      return res.status(201).json({ project: serializeProject(project), membership: { role: membership.role, repositoryWrite: membership.repositoryWrite } });
     } catch (error) { return routeError(res, error); }
   });
 
@@ -145,6 +240,28 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
     } catch (error) { return routeError(res, error); }
   });
 
+  router.post("/projects/:projectId/infer-commands", async (req: AuthenticatedRequest, res) => {
+    try {
+      const projectId = pathParam(req, "projectId");
+      await requireMember(prisma, projectId, req.userId!, { owner: true });
+      const requestedBranch = z.object({ branch: z.string().trim().min(1).max(200).optional() }).parse(req.body ?? {}).branch;
+      const [project, user] = await Promise.all([
+        prisma.project.findUniqueOrThrow({ where: { id: projectId } }),
+        prisma.user.findUniqueOrThrow({ where: { id: req.userId! }, select: { githubToken: true } }),
+      ]);
+      const commands = await inferGitHubRepositoryCommands(
+        githubTokenFor(user),
+        project.repositoryOwner,
+        project.repositoryName,
+        requestedBranch ?? project.branch,
+        project.agentCredential
+          ? { credential: project.agentCredential, model: project.coordinatorModel }
+          : undefined,
+      );
+      return res.json({ commands });
+    } catch (error) { return routeError(res, error); }
+  });
+
   router.post("/projects/:projectId/processes/start", async (req: AuthenticatedRequest, res) => {
     try {
       const projectId = pathParam(req, "projectId");
@@ -153,10 +270,23 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
       const payload = ProcessControlSchema.parse(req.body);
       const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
       const commands = { install: project.installCommand, frontend: project.frontendCommand, backend: project.backendCommand, test: project.testCommand };
+      if (payload.name === "preview") {
+        if (!commands.frontend && !commands.backend) return res.status(409).json({ error: "No frontend or backend preview command is configured" });
+        const delivered = scheduler.connections.emitToMapped(userId, projectId, "START_LOCAL_PREVIEW", {
+          projectId,
+          ...(commands.install ? { installCommand: commands.install } : {}),
+          ...(commands.frontend ? { frontendCommand: commands.frontend } : {}),
+          ...(commands.backend ? { backendCommand: commands.backend } : {}),
+        });
+        if (!delivered) return res.status(409).json({ error: "Local companion is offline or project is not mapped" });
+        return res.status(202).json({ started: ["install", "backend", "frontend"].filter((name) => Boolean(commands[name as keyof typeof commands])) });
+      }
       const command = commands[payload.name];
       if (!command) return res.status(409).json({ error: `${payload.name} command is not configured` });
-      if (!scheduler.connections.emitToMapped(userId, projectId, "START_LOCAL_PROCESS", { projectId, name: payload.name, command, cwd: payload.cwd })) return res.status(409).json({ error: "Local companion is offline or project is not mapped" });
-      return res.status(202).json({ started: true });
+      if (!scheduler.connections.emitToMapped(userId, projectId, "START_LOCAL_PROCESS", { projectId, name: payload.name, command, cwd: payload.cwd })) {
+        return res.status(409).json({ error: "Local companion is offline or project is not mapped" });
+      }
+      return res.status(202).json({ started: [payload.name] });
     } catch (error) { return routeError(res, error); }
   });
   router.post("/projects/:projectId/processes/stop", async (req: AuthenticatedRequest, res) => {
@@ -165,8 +295,16 @@ export function createApiRouter(prisma: PrismaClient, io: RelayServer, scheduler
       const userId = req.userId!;
       await requireMember(prisma, projectId, userId);
       const payload = ProcessControlSchema.pick({ name: true }).parse(req.body);
-      if (!scheduler.connections.emitToMapped(userId, projectId, "STOP_LOCAL_PROCESS", { projectId, name: payload.name })) return res.status(409).json({ error: "Local companion is offline or project is not mapped" });
-      return res.status(202).json({ stopped: true });
+      if (payload.name === "preview") {
+        if (!scheduler.connections.emitToMapped(userId, projectId, "STOP_LOCAL_PREVIEW", { projectId })) {
+          return res.status(409).json({ error: "Local companion is offline or project is not mapped" });
+        }
+        return res.status(202).json({ stopped: ["install", "frontend", "backend"] });
+      }
+      if (!scheduler.connections.emitToMapped(userId, projectId, "STOP_LOCAL_PROCESS", { projectId, name: payload.name })) {
+        return res.status(409).json({ error: "Local companion is offline or project is not mapped" });
+      }
+      return res.status(202).json({ stopped: [payload.name] });
     } catch (error) { return routeError(res, error); }
   });
 

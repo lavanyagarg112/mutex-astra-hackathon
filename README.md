@@ -30,7 +30,7 @@ The remote configured branch is canonical. The server never performs hidden Git 
 
 ## Quick start
 
-Requirements: Node.js 20+, npm, Docker, and Git.
+Requirements: Node.js 20+, npm, Git, and PostgreSQL 14+. Docker is optional. GitHub login is optional for a local demo and required for a deployed workspace.
 
 1. Install dependencies and create local environment files.
 
@@ -40,13 +40,19 @@ Requirements: Node.js 20+, npm, Docker, and Git.
    cp .env.example apps/web/.env
    ```
 
-2. Start PostgreSQL, generate the Prisma client, apply the migration, and seed the two-person demo.
+2. Start PostgreSQL, generate the Prisma client, apply the migration, and seed the two-person demo. On a Mac with Homebrew PostgreSQL:
+
+   ```bash
+   brew services start postgresql@14
+   createdb relaycode 2>/dev/null || true
+   npm run db:generate && npm run db:migrate && npm run db:seed
+   ```
+
+   If you do have Docker, the equivalent database startup is:
 
    ```bash
    docker compose up -d postgres
-   npm run db:generate
-   npm run db:migrate
-   npm run db:seed
+   npm run db:generate && npm run db:migrate && npm run db:seed
    ```
 
 3. Start the browser and coordination server.
@@ -55,11 +61,36 @@ Requirements: Node.js 20+, npm, Docker, and Git.
    npm run dev
    ```
 
-4. Open [http://localhost:5173](http://localhost:5173). The seeded usernames are `alice` and `bob`; username sign-in is intentionally simple for the hackathon.
+4. Open [http://localhost:5173](http://localhost:5173). For the local demo, use the seeded usernames `alice` or `bob`. For real repositories, add GitHub OAuth values below and choose **Continue with GitHub**.
 
 The server listens on `http://localhost:4100`. `GET /health` is the readiness check.
 
-## Connect a local companion
+## Connect the desktop companion
+
+For normal use, contributors do **not** clone this Relaycode repository or configure a daemon in a terminal. Publish the companion once, then each contributor:
+
+1. Signs in to Relaycode with GitHub.
+2. Opens **Personal settings → Download for macOS** and installs Relaycode Companion.
+3. Returns to Relaycode and chooses **Connect companion**. The browser opens the desktop app and passes a one-time pairing code.
+4. In the desktop app, chooses **Clone repository** or **Use existing folder** for each project.
+
+The Companion keeps its pairing token and GitHub credential only in that operating-system user account. It clones the project repository itself; it never asks the user to clone Relaycode. On macOS, build a distributable with:
+
+```bash
+npm run package:mac -w @relaycode/companion
+```
+
+For local development, run `npm run dev -w @relaycode/companion`. On macOS this creates and launches an unpacked `Relaycode Companion.app` with the real `relaycode://` registration; launching the generic Electron binary cannot receive website deep links correctly.
+
+When an owner creates a project, Relaycode inspects the configured GitHub branch and pre-fills the install, frontend, backend, and validation commands from repository conventions. Owners can review or edit every value under **Project settings → Commands**, or use **Infer again** after the repository changes. With the shared OpenAI key configured, the project agent interprets manifests, README instructions, CI workflows, Makefiles, Docker Compose, environment examples, and workspace configuration, then selects only commands grounded in those files; unsafe or ungrounded suggestions are rejected. Detection supports common npm/pnpm/yarn/Bun monorepos, Python/FastAPI/Django/pytest projects, Go, and Rust, and gracefully falls back to deterministic detection.
+
+The preview Play control runs the inferred install command to completion, retries it once on failure, and starts the backend and frontend only after installation succeeds. The companion reports the actual local development URL to the signed-in user's browser, which embeds it in the preview panel and always provides an external **Open** link for sites that disallow iframes.
+
+Required validation commands retry once immediately after a non-zero exit. Relaycode advances only if the retry succeeds; if it also fails after agent work, the existing repair loop receives the failure output, updates the implementation, and validates again before any push.
+
+Upload the generated DMG/ZIP to a release host and set `COMPANION_DOWNLOAD_URL_MAC` to its public download URL. The legacy CLI flow below remains useful for local development and CI.
+
+### Legacy CLI companion
 
 The companion stores its identity and project mappings locally in `~/.relaycode/config.json` with owner-only permissions. Git credentials use your existing local Git credential helper and are never sent to the server. First configure the companion identity:
 
@@ -126,6 +157,23 @@ git push --force-with-lease=refs/heads/<branch>:<observed-head> origin <branch>
 
 Protected branches may reject this operation; the application reports that failure and keeps its task records. For the rollback demo, use a branch whose protection rules permit history rewriting.
 
+## Deploy to Render
+
+Relaycode is deployable as one Docker web service plus PostgreSQL; the production server serves the built web app from the same origin. `render.yaml` provisions both.
+
+1. Push this repository to a GitHub repository you control and create a Render Blueprint from it.
+2. In GitHub, create an OAuth App. Its authorization callback must be exactly:
+
+   ```text
+   https://YOUR-RELAYCODE-DOMAIN/api/auth/github/callback
+   ```
+
+   Add `read:user repo` as the OAuth scope (`GITHUB_OAUTH_SCOPE`). `repo` is needed to list private repositories and verify write access.
+3. In Render, set the Blueprint's `PUBLIC_URL` and `WEB_ORIGIN` to `https://YOUR-RELAYCODE-DOMAIN`, then add the GitHub client ID, client secret, callback URL, and scope. Keep `ALLOW_DEMO_AUTH=false`.
+4. Build and upload the macOS companion, then set `COMPANION_DOWNLOAD_URL_MAC`. People can now sign in, join only repositories their GitHub account can write to, and pair their local Companion without a terminal.
+
+There is no universal “Sign in with ChatGPT” authentication flow used here. GitHub OAuth is the right identity source because it also provides the repository authorization check Relaycode needs.
+
 ## Useful commands
 
 ```bash
@@ -134,6 +182,7 @@ npm run dev:all             # web + server + one companion
 npm run build               # all workspaces
 npm run typecheck           # TypeScript checks
 npm test                    # scheduler/Git/unit tests
+npm run package:mac -w @relaycode/companion # macOS desktop companion
 npm run db:generate         # Prisma client
 npm run db:migrate          # deploy checked-in SQL migration
 npm run db:seed             # reset/upsert demo records
@@ -151,7 +200,7 @@ npm run cli -w @relaycode/daemon -- list
 
 ## Security and MVP boundaries
 
-- Username sign-in is a deliberate demo authentication seam. Replace it with your identity provider and signed sessions before exposing the service publicly.
+- GitHub OAuth is used for production sign-in and repository-access validation. Username sign-in is available only when `ALLOW_DEMO_AUTH=true`, which the production blueprint disables.
 - Project membership and write permission are checked for every server action and WebSocket command.
 - Daemons authenticate separately, and tasks are dispatched only to the requesting user's socket.
 - Agent output and messages are rendered as text, not HTML. Sensitive settings are redacted from browser payloads and activity metadata.

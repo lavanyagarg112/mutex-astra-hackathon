@@ -29,6 +29,13 @@ interface ActiveExecution {
   promise: Promise<void>;
 }
 
+class ValidationCommandError extends Error {
+  constructor(readonly exitCode: number | null, readonly output: string) {
+    super(`Validation command failed with exit code ${exitCode ?? "unknown"}.`);
+    this.name = "ValidationCommandError";
+  }
+}
+
 export class DaemonRuntime {
   private readonly active = new Map<string, ActiveExecution>();
   private readonly rollbackProjects = new Set<string>();
@@ -67,9 +74,15 @@ export class DaemonRuntime {
     this.socket.on("SYNC_PROJECT", (payload) => void this.syncProject(payload));
     this.socket.on("START_ROLLBACK", (payload) => void this.startRollback(payload));
     this.socket.on("START_LOCAL_PROCESS", (payload) => void this.processes.start(payload.projectId, payload.name, payload.command, payload.cwd).catch((error) => {
+      this.processes.reportFailure(payload.projectId, payload.name);
       this.activity(payload.projectId, undefined, "PROCESS", `Could not start ${payload.name}: ${this.errorMessage(error)}`);
     }));
     this.socket.on("STOP_LOCAL_PROCESS", ({ projectId, name }) => void this.processes.stop(projectId, name));
+    this.socket.on("START_LOCAL_PREVIEW", (payload) => void this.processes.startPreview(payload.projectId, payload).catch((error) => {
+      this.processes.reportFailure(payload.projectId, "preview");
+      this.activity(payload.projectId, undefined, "PROCESS", `Could not start preview: ${this.errorMessage(error)}`);
+    }));
+    this.socket.on("STOP_LOCAL_PREVIEW", ({ projectId }) => void this.processes.stopPreview(projectId));
   }
 
   async close(): Promise<void> {
@@ -150,6 +163,22 @@ export class DaemonRuntime {
         baseCommitSha: sync.commitSha,
       });
 
+      if (project.toolPermissions?.tests === false) throw new Error("Validation is required before push, but test execution is disabled for this project.");
+      if (!project.testCommand) throw new Error("Validation is required before push. Configure a test command in Project settings → Commands.");
+
+      // A clean remote checkout must pass before the agent is allowed to edit.
+      // Otherwise an environment or pre-existing repository problem could be
+      // misdiagnosed as a regression caused by the task.
+      this.activity(project.id, task.id, "TEST", "checking clean remote baseline");
+      try {
+        await this.runConfiguredCommand(execution, project.testCommand, "TEST");
+      } catch (error) {
+        if (error instanceof ValidationCommandError) {
+          throw new Error(`Clean remote baseline validation failed before the agent ran. Fix the project test environment or the configured validation command, then retry. ${this.validationExcerpt(error)}`);
+        }
+        throw error;
+      }
+
       await execution.provider.run({
         payload,
         repositoryPath: binding.path,
@@ -160,10 +189,43 @@ export class DaemonRuntime {
       });
       if (controller.signal.aborted) throw controller.signal.reason;
 
-      if (project.toolPermissions?.tests === false) throw new Error("Validation is required before push, but test execution is disabled for this project.");
-      if (!project.testCommand) throw new Error("Validation is required before push. Configure a test command in Project settings → Commands.");
-      this.taskStatus(execution, "VALIDATING", false, "Running required project validation");
-      await this.runConfiguredCommand(execution, project.testCommand, "TEST");
+      const configuredAttempts = Number(process.env.RELAYCODE_VALIDATION_REPAIR_ATTEMPTS ?? 2);
+      const repairAttempts = Number.isFinite(configuredAttempts) ? Math.max(0, Math.min(3, Math.floor(configuredAttempts))) : 2;
+      for (let attempt = 0; ; attempt += 1) {
+        this.taskStatus(execution, "VALIDATING", false, attempt === 0 ? "Running required project validation" : `Re-running validation after repair ${attempt}`);
+        try {
+          await this.runConfiguredCommand(execution, project.testCommand, "TEST");
+          break;
+        } catch (error) {
+          if (!(error instanceof ValidationCommandError) || attempt >= repairAttempts) {
+            if (error instanceof ValidationCommandError) throw new Error(`Validation still fails after ${attempt} repair attempt${attempt === 1 ? "" : "s"}. ${this.validationExcerpt(error)}`);
+            throw error;
+          }
+
+          const repairNumber = attempt + 1;
+          this.taskStatus(execution, "EDITING", false, `Repairing validation failure (${repairNumber}/${repairAttempts})`);
+          this.output(project.id, task.id, "AGENT", `Validation failed. Sending the test output back to the developer agent for repair ${repairNumber} of ${repairAttempts}.`);
+          execution.provider = createAgentProvider(this.config, payload.agentCredential, payload.project.developerModel);
+          const repairPayload: StartTaskPayload = {
+            ...payload,
+            request: [
+              payload.request,
+              `Repair the implementation so the required validation command passes. This is repair attempt ${repairNumber} of ${repairAttempts}.`,
+              "Do not weaken, delete, or bypass tests. Diagnose the implementation and make the smallest correct code change.",
+              `Validation output:\n${error.output.slice(-12_000)}`,
+            ].join("\n\n"),
+          };
+          await execution.provider.run({
+            payload: repairPayload,
+            repositoryPath: binding.path,
+            signal: controller.signal,
+            pauseGate: execution.pauseGate,
+            status: ({ shortStatus }) => this.taskStatus(execution, "EDITING", false, shortStatus),
+            output: (category, message) => this.output(project.id, task.id, category, message),
+          });
+          if (controller.signal.aborted) throw controller.signal.reason;
+        }
+      }
       this.taskStatus(execution, "PUSHING", false, "Checking remote and creating one commit");
       const identity = await this.gitIdentity(binding, payload);
       const result = await commitAndPush(binding, project.branch, sync.commitSha, execution.baselineUntracked, {
@@ -202,7 +264,9 @@ export class DaemonRuntime {
         code: cancelled ? "CANCELLED" : "PUSH_FAILED",
         message: cancelled ? "Task cancelled; tracked changes were discarded." : this.errorMessage(error),
       });
-      this.activity(project.id, task.id, cancelled ? "TASK" : "ERROR", cancelled ? `#${task.number} cancelled` : this.errorMessage(error));
+      // The server records the terminal failure/cancellation once when it
+      // processes GIT_PUSH_RESULT. Emitting another activity here duplicates
+      // the same error in the project terminal.
     }
   }
 
@@ -329,7 +393,20 @@ export class DaemonRuntime {
     return { name, email };
   }
 
-  private async runConfiguredCommand(execution: ActiveExecution, command: string, category: "TEST"): Promise<void> {
+  private async runConfiguredCommand(execution: ActiveExecution, command: string, category: "TEST"): Promise<string> {
+    try {
+      return await this.runConfiguredCommandOnce(execution, command, category);
+    } catch (error) {
+      if (!(error instanceof ValidationCommandError) || execution.controller.signal.aborted) throw error;
+      const projectId = execution.payload.project.id;
+      const taskId = execution.payload.task.id;
+      this.activity(projectId, taskId, category, `Command failed with exit code ${error.exitCode ?? "unknown"}; retrying once before continuing`);
+      this.output(projectId, taskId, category, "The latest command failed. Retrying it once before Relaycode continues to the next step.");
+      return this.runConfiguredCommandOnce(execution, command, category);
+    }
+  }
+
+  private async runConfiguredCommandOnce(execution: ActiveExecution, command: string, category: "TEST"): Promise<string> {
     await execution.pauseGate.wait(execution.controller.signal);
     const child = spawn(command, {
       cwd: execution.binding.path,
@@ -354,7 +431,13 @@ export class DaemonRuntime {
     });
     this.output(execution.payload.project.id, execution.payload.task.id, category, output);
     if (execution.controller.signal.aborted) throw execution.controller.signal.reason;
-    if (code !== 0) throw new Error(`Validation command failed with exit code ${code}.`);
+    if (code !== 0) throw new ValidationCommandError(code, sanitizeText(output));
+    return output;
+  }
+
+  private validationExcerpt(error: ValidationCommandError): string {
+    const excerpt = sanitizeText(error.output).trim().slice(-1_200);
+    return excerpt ? `Last output: ${excerpt}` : error.message;
   }
 
   private signalChild(child: ChildProcess | undefined, signal: NodeJS.Signals): void {

@@ -1,16 +1,17 @@
 import "dotenv/config";
 import { createServer } from "node:http";
+import { resolve } from "node:path";
 import cors from "cors";
 import express from "express";
 import { Server } from "socket.io";
 import type { ClientToServerEvents, ServerToClientEvents } from "@relaycode/shared";
+import { createAuthRouter } from "./auth-routes.js";
 import { prisma } from "./db.js";
 import { createApiRouter } from "./routes.js";
 import { ConnectionRegistry, type RelayServer } from "./realtime.js";
 import { RuntimeState } from "./runtime.js";
 import { Scheduler } from "./scheduler.js";
 import { installSocketHandlers } from "./socket.js";
-import { serializeUser } from "./serialize.js";
 
 const app = express();
 const httpServer = createServer(app);
@@ -23,14 +24,22 @@ app.disable("x-powered-by");
 app.use(cors({ origin, credentials: true }));
 app.use(express.json({ limit: "2mb" }));
 app.get("/health", (_req, res) => res.json({ ok: true }));
-app.post("/api/auth/login", async (req, res) => {
-  const username = typeof req.body?.username === "string" ? req.body.username.trim().toLowerCase() : "";
-  if (!username) return res.status(400).json({ error: "Username is required" });
-  const user = await prisma.user.findUnique({ where: { username } });
-  if (!user) return res.status(401).json({ error: "Unknown username" });
-  return res.json({ user: serializeUser(user), demoUserId: user.id });
+app.get("/api/companion/download", (_req, res) => {
+  const url = process.env.COMPANION_DOWNLOAD_URL_MAC;
+  if (!url) return res.status(503).json({ error: "The companion download has not been published yet." });
+  return res.redirect(url);
 });
+app.use("/api/auth", createAuthRouter(prisma));
 app.use("/api", createApiRouter(prisma, io, scheduler, runtime));
+app.use("/api", (error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error("Unhandled API error", error instanceof Error ? error.message : "Unknown error");
+  res.status(500).json({ error: "Internal server error" });
+});
+if (process.env.NODE_ENV === "production") {
+  const webRoot = resolve(process.cwd(), "apps/web/dist");
+  app.use(express.static(webRoot));
+  app.get("/{*path}", (_req, res) => res.sendFile(resolve(webRoot, "index.html")));
+}
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 
 installSocketHandlers(io, prisma, scheduler, runtime);

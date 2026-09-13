@@ -1,16 +1,60 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { Request, Response, NextFunction } from "express";
 import type { PrismaClient, ProjectRole } from "@prisma/client";
 
-export type AuthenticatedRequest = Request & { userId?: string };
+export type AuthMethod = "session" | "demo";
+export type AuthenticatedRequest = Request & { userId?: string; authMethod?: AuthMethod };
+export const SESSION_COOKIE = "relaycode_session";
 
-export function demoAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  const userId = req.header("x-user-id") ?? (typeof req.query.userId === "string" ? req.query.userId : undefined);
-  if (!userId) {
-    res.status(401).json({ error: "Authentication required. For the demo, send x-user-id." });
-    return;
+export function demoAuthEnabled() {
+  return process.env.ALLOW_DEMO_AUTH === "true" || (process.env.ALLOW_DEMO_AUTH !== "false" && process.env.NODE_ENV !== "production");
+}
+
+export function createAuthMiddleware(prisma: PrismaClient) {
+  return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const authenticated = await resolveRequestUser(prisma, req);
+      if (!authenticated) return res.status(401).json({ error: "Authentication required. Sign in with GitHub." });
+      req.userId = authenticated.userId;
+      req.authMethod = authenticated.method;
+      next();
+    } catch (error) { next(error); }
+  };
+}
+
+export async function resolveRequestUser(prisma: PrismaClient, req: Pick<Request, "headers" | "query">) {
+  const sessionToken = readCookie(req.headers.cookie, SESSION_COOKIE);
+  if (sessionToken) {
+    const session = await prisma.authSession.findUnique({ where: { tokenHash: hashToken(sessionToken) } });
+    if (session && session.expiresAt > new Date()) return { userId: session.userId, method: "session" as const };
+    if (session) await prisma.authSession.delete({ where: { id: session.id } }).catch(() => undefined);
   }
-  req.userId = userId;
-  next();
+  if (!demoAuthEnabled()) return null;
+  const header = req.headers["x-user-id"];
+  const userId = (typeof header === "string" ? header : undefined) ?? (typeof req.query.userId === "string" ? req.query.userId : undefined);
+  return userId ? { userId, method: "demo" as const } : null;
+}
+
+export function hashToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+export function readCookie(header: string | undefined, name: string) {
+  if (!header) return undefined;
+  for (const item of header.split(";")) {
+    const [key, ...parts] = item.trim().split("=");
+    if (key === name) return decodeURIComponent(parts.join("="));
+  }
+  return undefined;
+}
+
+export function secureCookie() {
+  return process.env.NODE_ENV === "production" || (process.env.PUBLIC_URL ?? "").startsWith("https://");
+}
+
+export function safeEqual(left: string, right: string) {
+  const a = Buffer.from(left); const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export async function requireMember(
@@ -41,4 +85,3 @@ export function routeError(res: Response, error: unknown) {
   console.error("Request failed", error instanceof Error ? error.message : "Unknown error");
   return res.status(500).json({ error: "Internal server error" });
 }
-

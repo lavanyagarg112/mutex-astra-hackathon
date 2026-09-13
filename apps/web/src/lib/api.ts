@@ -16,6 +16,7 @@ export function setActiveUserId(userId: string): void {
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       "content-type": "application/json",
       ...(getActiveUserId() ? { "x-user-id": getActiveUserId() } : {}),
@@ -24,7 +25,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const message = await response.text().catch(() => response.statusText);
-    throw new Error(message || `Request failed (${response.status})`);
+    const error = new Error(message || `Request failed (${response.status})`) as Error & { status: number };
+    error.status = response.status;
+    throw error;
   }
   return response.json() as Promise<T>;
 }
@@ -32,6 +35,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 export function connectSocket(): Socket<ServerToClientEvents, ClientToServerEvents> {
   return io(API_URL || window.location.origin, {
     auth: { userId: getActiveUserId() },
+    withCredentials: true,
     transports: ["websocket", "polling"],
     reconnectionDelayMax: 3000,
   });
@@ -42,6 +46,7 @@ export async function loginWithUsername(username: string): Promise<string> {
   try {
     const response = await fetch(`${API_URL}/api/auth/login`, {
       method: "POST",
+      credentials: "include",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ username: normalized }),
     });
@@ -56,4 +61,10 @@ export async function loginWithUsername(username: string): Promise<string> {
     }
     throw error;
   }
+}
+
+export function beginGithubLogin(): void {
+  const returnTo = `${window.location.pathname}${window.location.search}`;
+  window.localStorage.setItem("relaycode.authReturnTo", returnTo);
+  window.location.assign(`${API_URL}/api/auth/github?returnTo=${encodeURIComponent(returnTo)}`);
 }

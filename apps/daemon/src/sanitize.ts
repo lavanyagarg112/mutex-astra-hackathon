@@ -1,4 +1,8 @@
-import { redactSensitive } from "@relaycode/shared";
+// Use the repository-relative source path so monorepo builds emit a matching
+// relative import to the compiled shared JavaScript. Importing the workspace
+// package by name resolves to src/index.ts inside packaged Electron, where Node
+// intentionally refuses to strip TypeScript from node_modules.
+import { redactSensitive } from "../../../packages/shared/src/index.js";
 
 const INLINE_SECRET = /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|bearer\s+[A-Za-z0-9._~+/=-]+)\b/gi;
 const URL_CREDENTIALS = /(https?:\/\/)([^\s/@:]+):([^\s/@]+)@/gi;

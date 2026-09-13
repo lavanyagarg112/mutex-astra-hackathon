@@ -34,6 +34,7 @@ export const TaskSchema = z.object({
   type: TaskTypeSchema, status: TaskStatusSchema, queuePriority: z.number(), queueSequence: z.number(),
   requestedByUserId: z.string(), executorUserId: z.string().nullable(), baseCommitSha: z.string().nullable(),
   commitSha: z.string().nullable(), amendable: z.boolean(), shortStatus: z.string().nullable(), diff: StoredDiffSchema.nullable().optional(),
+  failureReason: z.string().nullable().optional(),
   createdAt: z.string(), startedAt: z.string().nullable(), completedAt: z.string().nullable(),
   rootMessage: MessageSchema.optional(), requestedBy: UserSchema.optional(), executor: UserSchema.nullable().optional(),
   messages: z.array(MessageSchema).optional(), parentTask: z.object({ number: z.number(), rootMessage: z.object({ body: z.string() }) }).nullable().optional(),
@@ -60,8 +61,18 @@ export const CreateProjectSchema = z.object({
   name: z.string().trim().min(2).max(100),
   repositoryUrl: z.string().trim().min(5).max(2_000),
   branch: z.string().trim().min(1).max(200).default("main"),
-  testCommand: z.string().trim().min(1).max(1_000),
+  testCommand: z.string().trim().min(1).max(1_000).nullable().optional(),
 });
+export const InferredCommandsSchema = z.object({
+  installCommand: z.string().nullable(),
+  frontendCommand: z.string().nullable(),
+  backendCommand: z.string().nullable(),
+  testCommand: z.string().nullable(),
+  detectedFrom: z.array(z.string()),
+  inferenceMethod: z.enum(["deterministic", "agent"]).default("deterministic"),
+  diagnostics: z.array(z.string()).default([]),
+});
+export type InferredCommands = z.infer<typeof InferredCommandsSchema>;
 export const CreateRefinementSchema = z.object({ projectId: z.string(), parentTaskId: z.string(), body: z.string().trim().min(2).max(10_000), explicit: z.boolean().default(true) });
 export const TaskControlSchema = z.object({ projectId: z.string(), taskId: z.string() });
 export const RollbackTaskSchema = TaskControlSchema.extend({ confirmation: z.literal("ROLLBACK") });
@@ -105,7 +116,7 @@ export interface ClientToServerEvents {
   GIT_SYNC_RESULT: (payload: z.infer<typeof GitSyncResultSchema>) => void;
   GIT_PUSH_RESULT: (payload: z.infer<typeof GitPushResultSchema>) => void;
   ROLLBACK_RESULT: (payload: z.infer<typeof RollbackResultSchema>) => void;
-  PROCESS_STATUS: (payload: { projectId: string; name: string; status: string; port?: number; url?: string }) => void;
+  PROCESS_STATUS: (payload: { projectId: string; name: string; status: "starting" | "running" | "stopped" | "failed"; port?: number; url?: string }) => void;
   ACTIVITY_EVENT: (payload: z.infer<typeof ActivityInputSchema>) => void;
   CREATE_REQUEST: (payload: z.infer<typeof CreateRequestSchema>) => void;
   CREATE_REFINEMENT: (payload: z.infer<typeof CreateRefinementSchema>) => void;
@@ -126,6 +137,8 @@ export interface ServerToClientEvents {
   START_ROLLBACK: (payload: StartRollbackPayload) => void;
   START_LOCAL_PROCESS: (payload: { projectId: string; name: string; command: string; cwd?: string }) => void;
   STOP_LOCAL_PROCESS: (payload: { projectId: string; name: string }) => void;
+  START_LOCAL_PREVIEW: (payload: { projectId: string; installCommand?: string; frontendCommand?: string; backendCommand?: string }) => void;
+  STOP_LOCAL_PREVIEW: (payload: { projectId: string }) => void;
   QUEUE_UPDATED: (payload: { projectId: string }) => void;
   TASK_UPDATED: (payload: { projectId: string; taskId: string }) => void;
   MESSAGE_CREATED: (payload: { projectId: string; messageId: string }) => void;

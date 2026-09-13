@@ -119,7 +119,16 @@ export class Scheduler {
       if (cancelled) return;
     }
     const task = await this.ownedActiveTask(payload.projectId, payload.taskId, userId);
-    if (task.status !== "PUSHING") throw new HttpError(409, "Task is not in the pushing phase");
+    if (task.status !== "PUSHING") {
+      if (!payload.ok && payload.code === "PUSH_FAILED" && ["SYNCING", "PLANNING", "EDITING", "VALIDATING"].includes(task.status)) {
+        await this.prisma.task.update({ where: { id: task.id }, data: { status: "FAILED", amendable: false, failureReason: payload.message, shortStatus: "Validation or agent execution failed", completedAt: new Date() } });
+        await recordActivity(this.prisma, this.io, { projectId: task.projectId, taskId: task.id, userId, category: "ERROR", message: payload.message });
+        this.taskUpdated(task.projectId, task.id);
+        void this.schedule(task.projectId);
+        return;
+      }
+      throw new HttpError(409, "Task is not in the pushing phase");
+    }
     if (payload.ok) {
       if (!task.baseCommitSha || payload.baseCommitSha !== task.baseCommitSha) throw new HttpError(409, "Push result base SHA does not match the task base commit");
       await this.prisma.$transaction([

@@ -6,3 +6,4 @@ dist
 apps/server/prisma/dev.db
 .relaycode
 coverage
+apps/companion/release

@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { io, type Socket } from "socket.io-client";
-import type { ClientToServerEvents, ServerToClientEvents } from "@relaycode/shared";
 import { addProjectBinding, configPath, DaemonConfigSchema, loadConfig, saveConfig, type DaemonConfig } from "./config.js";
 import { validateRepository } from "./git.js";
-import { DaemonRuntime } from "./runtime.js";
 import { sanitizeText } from "./sanitize.js";
+import { startDaemon } from "./service.js";
 
 const args = process.argv.slice(2);
 
@@ -15,10 +13,6 @@ function flag(name: string): string | undefined {
   if (equals) return equals.slice(name.length + 3);
   const index = args.indexOf(`--${name}`);
   return index >= 0 ? args[index + 1] : undefined;
-}
-
-function hasFlag(name: string): boolean {
-  return args.includes(`--${name}`);
 }
 
 async function optionalConfig(): Promise<DaemonConfig | undefined> {
@@ -96,15 +90,11 @@ async function list(): Promise<void> {
 
 async function start(): Promise<void> {
   const config = await loadConfig();
-  const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io(config.serverUrl, {
-    auth: { userId: config.userId, token: config.token, client: "daemon" },
-    transports: hasFlag("polling") ? ["polling", "websocket"] : ["websocket"],
-    autoConnect: false,
-    reconnection: true,
+  const runtime = startDaemon(config, (status) => {
+    if (status.state === "connected") console.log(`Connected to ${status.serverUrl} as ${status.userId}.`);
+    if (status.state === "disconnected") console.log(`Disconnected from Relaycode (${status.reason}); reconnecting…`);
+    if (status.state === "error") console.error(`Connection error: ${status.message}`);
   });
-  const runtime = new DaemonRuntime(config, socket);
-  runtime.install();
-  socket.connect();
 
   let closing = false;
   const shutdown = async () => {

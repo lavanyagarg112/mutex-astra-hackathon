@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: relaycode
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: relaycode-db
+          property: connectionString
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4100
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: TOKEN_ENCRYPTION_KEY
+        generateValue: true
+      - key: ALLOW_DEMO_AUTH
+        value: "false"
+      - key: PUBLIC_URL
+        sync: false
+      - key: WEB_ORIGIN
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_CALLBACK_URL
+        sync: false
+      - key: COMPANION_DOWNLOAD_URL_MAC
+        sync: false
+
+databases:
+  - name: relaycode-db
+    plan: free
+    databaseName: relaycode
+    user: relaycode

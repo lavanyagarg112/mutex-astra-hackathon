@@ -16,7 +16,7 @@ import {
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { recordActivity } from "./activity.js";
-import { HttpError, requireMember } from "./auth.js";
+import { demoAuthEnabled, hashToken, HttpError, readCookie, requireMember, SESSION_COOKIE } from "./auth.js";
 import type { RelayServer, RelaySocket } from "./realtime.js";
 import { RuntimeState } from "./runtime.js";
 import { Scheduler } from "./scheduler.js";
@@ -73,7 +73,7 @@ export function installSocketHandlers(io: RelayServer, prisma: PrismaClient, sch
     socket.on("GIT_PUSH_RESULT", (raw) => void guarded(socket, async () => scheduler.pushResult(socket, GitPushResultSchema.parse(raw))));
     socket.on("ROLLBACK_RESULT", (raw) => void guarded(socket, async () => scheduler.rollbackResult(socket, RollbackResultSchema.parse(raw))));
     socket.on("PROCESS_STATUS", (raw) => void guarded(socket, async () => {
-      const payload = z.object({ projectId: z.string(), name: z.string().max(80), status: z.string().max(80), port: z.number().int().min(1).max(65535).optional(), url: z.string().url().optional() }).parse(raw);
+      const payload = z.object({ projectId: z.string(), name: z.string().max(80), status: z.enum(["starting", "running", "stopped", "failed"]), port: z.number().int().min(1).max(65535).optional(), url: z.string().url().optional() }).parse(raw);
       const userId = daemonUser(socket, scheduler);
       await requireMember(prisma, payload.projectId, userId);
       runtime.setProcess({ ...payload, userId });
@@ -144,7 +144,11 @@ export function installSocketHandlers(io: RelayServer, prisma: PrismaClient, sch
 }
 
 async function joinBrowserRooms(socket: RelaySocket, prisma: PrismaClient) {
-  const candidate = socket.handshake.auth?.userId;
+  const rawSession = readCookie(socket.handshake.headers.cookie, SESSION_COOKIE);
+  const session = rawSession ? await prisma.authSession.findUnique({ where: { tokenHash: hashToken(rawSession) } }) : null;
+  const candidate = session && session.expiresAt > new Date()
+    ? session.userId
+    : demoAuthEnabled() ? socket.handshake.auth?.userId : undefined;
   if (typeof candidate !== "string") return;
   const user = await prisma.user.findUnique({ where: { id: candidate } });
   if (!user) return;
