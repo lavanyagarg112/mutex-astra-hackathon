@@ -58,6 +58,8 @@ import type { Socket } from "socket.io-client";
 import type { ClientToServerEvents, ServerToClientEvents } from "@relaycode/shared";
 import { PixelAvatar, PixelCrew } from "./PixelCrew";
 import { PIXEL_SKINS } from "./pixelCharacters";
+import { cx } from "./lib/cx";
+import { LandingPage } from "./LandingPage";
 
 type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 type Member = User & { online: boolean; present: boolean; daemonVersion?: string; syncedSha?: string; mapped?: boolean; synchronized?: boolean; localPath?: string; color: string };
@@ -102,7 +104,6 @@ const statusMeta: Record<TaskStatus, { label: string; tone: string; dot: string 
   DISCARDED_BY_ROLLBACK: { label: "Discarded by rollback", tone: "bg-zinc-100 text-zinc-500", dot: "bg-zinc-400" },
 };
 
-function cx(...classes: Array<string | false | null | undefined>) { return classes.filter(Boolean).join(" "); }
 function shortSha(sha?: string | null) { return sha?.slice(0, 7) ?? "—"; }
 function normalizeProject(raw: Project & Partial<ProjectItem>): ProjectItem {
   const members = Array.isArray(raw.members) ? raw.members : [];
@@ -166,7 +167,7 @@ export default function App() {
       .finally(() => setCheckingSession(false));
   }, [signedIn]);
   if (checkingSession) return <div className="grid min-h-screen place-items-center bg-[#f4f4f2]"><div className="flex items-center gap-2 text-[11px] text-zinc-500"><LoaderCircle size={15} className="animate-spin" /> Signing you in…</div></div>;
-  if (!signedIn) return <LoginScreen />;
+  if (!signedIn) return <LandingPage />;
   return <Workspace />;
 }
 
@@ -486,23 +487,6 @@ function Workspace() {
       {pairingState && <CompanionConnectStatus state={pairingState} onClose={() => { setPairingState(null); window.history.replaceState({}, "", "/"); }} />}
     </div>
   );
-}
-
-function LoginScreen() {
-  const oauthError = new URLSearchParams(window.location.search).get("error");
-  return <div className="grid min-h-screen place-items-center bg-[#f4f4f2] p-5">
-    <div className="enter-up w-full max-w-[420px] overflow-hidden rounded-[24px] border border-zinc-200 bg-white shadow-float">
-      <div className="border-b border-zinc-100 px-7 pb-7 pt-8">
-        <img src="/brand/mutex-mark-navy.png" alt="Mutex" className="size-11 rounded-[14px] object-cover" />
-        <h1 className="mt-6 text-[28px] font-semibold tracking-[-0.045em]">Welcome to Mutex</h1>
-        <p className="mt-2 text-[12px] leading-5 text-zinc-500">Sign in to collaborate on repositories your GitHub account can access.</p>
-      </div>
-      <div className="px-7 py-7">
-        {oauthError && <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-[10px] leading-4 text-red-700">{oauthError}</div>}
-        <button onClick={beginGithubLogin} className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-zinc-950 text-[11px] font-medium text-white transition hover:bg-zinc-800"><Github size={15} /> Continue with GitHub</button>
-      </div>
-    </div>
-  </div>;
 }
 
 function ProjectSidebar({ projects, user, companion, authorised, selectedId, open, collapsed, onToggleCollapsed, onClose, onSelect, onCreateProject, onUserSettings }: { projects: ProjectItem[]; user: User; companion?: Member; authorised: boolean; selectedId: string; open: boolean; collapsed: boolean; onToggleCollapsed: () => void; onClose: () => void; onSelect: (id: string) => void; onCreateProject: () => void; onUserSettings: () => void }) {
