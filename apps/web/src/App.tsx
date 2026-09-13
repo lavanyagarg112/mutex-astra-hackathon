@@ -666,7 +666,9 @@ function PreviewPanel({ project, processes, mode }: { project: ProjectItem; proc
   const previewUrl = web?.url;
   const failed = processes.some((process) => process.status === "failed" && (process.name === "install" || process.name === "frontend" || (!project.frontendCommand && process.name === "backend")));
   const starting = processes.some((process) => process.status === "starting") || (running && !previewUrl);
-  useEffect(() => setRunning(processes.some((process) => process.status === "running")), [processes]);
+  useEffect(() => {
+    setRunning(processes.some((process) => process.status === "running"));
+  }, [processes]);
   const togglePreview = async () => {
     const next = !running;
     try {
@@ -699,7 +701,9 @@ function PreviewPanel({ project, processes, mode }: { project: ProjectItem; proc
 
 function ActivityPanel({ activity }: { activity: Activity[] }) {
   const bottom = useRef<HTMLDivElement>(null);
-  useEffect(() => bottom.current?.scrollIntoView({ behavior: "smooth" }), [activity.length]);
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activity.length]);
   const categoryColor: Record<string, string> = { REQUEST: "text-blue-300", GIT: "text-violet-300", AGENT: "text-amber-300", REFINE: "text-orange-300", TEST: "text-emerald-300", SYNC: "text-cyan-300", TASK: "text-zinc-100" };
   return <div className="flex min-h-0 flex-1 flex-col bg-[#151515] text-zinc-300">
     <div className="flex items-center justify-between border-b border-white/10 px-4 py-3"><div className="flex items-center gap-2 text-[10px] font-medium text-zinc-200"><TerminalSquare size={13} /> Project activity</div><div className="flex items-center gap-1.5 font-mono text-[8px] text-zinc-500"><span className="size-1.5 rounded-full bg-emerald-400 pulse-soft" /> streaming</div></div>
